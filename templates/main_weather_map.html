@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Weather Visualization Platform</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        
+        /* Control Panel */
+        .control-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: 300px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+            z-index: 1;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+        
+        .control-panel h3 {
+            margin: 0 0 15px 0;
+            font-family: Arial, sans-serif;
+            font-size: 18px;
+        }
+        
+        .control-section {
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .control-section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+        
+        .btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            width: 100%;
+            margin-bottom: 10px;
+            transition: background 0.2s;
+            font-family: Arial, sans-serif;
+        }
+        
+        .btn:hover {
+            background: #2563eb;
+        }
+        
+        .btn-success {
+            background: #10b981;
+        }
+        
+        .btn-success:hover {
+            background: #059669;
+        }
+        
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+        
+        /* Slider Styles */
+        .slider-container {
+            margin: 15px 0;
+        }
+        
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+        }
+        
+        .slider {
+            width: 100%;
+            height: 5px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.3);
+            outline: none;
+            -webkit-appearance: none;
+            cursor: pointer;
+        }
+        
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+        }
+        
+        .slider::-moz-range-thumb {
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+            border: none;
+        }
+        
+        /* Legend */
+        .legend {
+            position: absolute;
+            bottom: 30px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 1;
+            font-family: Arial, sans-serif;
+        }
+        
+        .legend-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        .legend-gradient {
+            width: 200px;
+            height: 20px;
+            background: linear-gradient(to right, 
+                #86a3ab 0%, 
+                #6e8fd0 20%, 
+                #0f93a7 30%, 
+                #39a339 45%, 
+                #c2863e 60%, 
+                #c8420d 75%, 
+                #af5088 85%, 
+                #c2fb77 95%, 
+                #ffffff 100%
+            );
+            margin-bottom: 5px;
+            border-radius: 3px;
+        }
+        
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 11px;
+        }
+        
+        /* Select dropdown */
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-bottom: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 4px;
+            font-size: 14px;
+            font-family: Arial, sans-serif;
+        }
+        
+        select option {
+            background: #333;
+        }
+        
+        /* Notification styles */
+        .notification {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 4px;
+            z-index: 1000;
+            font-family: Arial, sans-serif;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+        }
+        
+        .notification.success {
+            border-left: 4px solid #10b981;
+        }
+        
+        .notification.error {
+            border-left: 4px solid #ef4444;
+        }
+        
+        /* Progress */
+        .progress-container {
+            display: none;
+            margin: 10px 0;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #3b82f6;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 12px;
+        }
+        
+        /* Loading */
+        .loading {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2;
+        }
+        
+        .loading.active {
+            display: block;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <!-- Control Panel -->
+    <div class="control-panel">
+        <h3>🌍 Weather Visualization</h3>
+        
+        <!-- Dataset Selection -->
+        <div class="control-section">
+            <label style="display: block; margin-bottom: 5px; font-size: 14px;">Select Dataset:</label>
+            <select id="tilesetSelector">
+                {% for tileset in available_tilesets %}
+                <option value="{{ tileset.id }}" {% if tileset.id == default_tileset.id %}selected{% endif %}>
+                    {{ tileset.name }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        
+        <!-- Upload Section -->
+        <div class="control-section">
+            <button class="btn btn-success" id="uploadBtn">
+                📤 Upload NetCDF File
+            </button>
+            <input type="file" id="fileInput" accept=".nc" style="display: none;">
+            
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill">0%</div>
+                </div>
+                <p id="uploadStatus" style="margin-top: 5px; font-size: 12px;"></p>
+            </div>
+        </div>
+        
+        <!-- Wind Controls -->
+        <div class="control-section">
+            <h4 style="margin: 0 0 10px 0; font-size: 16px;">Wind Animation Controls</h4>
+            
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>Speed Factor</span>
+                    <span id="speedValue">0.4</span>
+                </div>
+                <input type="range" class="slider" id="speedSlider" 
+                       min="0.1" max="1" step="0.1" value="0.4">
+            </div>
+            
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>Particle Count</span>
+                    <span id="particleValue">4000</span>
+                </div>
+                <input type="range" class="slider" id="particleSlider" 
+                       min="1000" max="8000" step="500" value="4000">
+            </div>
+            
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>Fade Opacity</span>
+                    <span id="fadeValue">0.9</span>
+                </div>
+                <input type="range" class="slider" id="fadeSlider" 
+                       min="0.1" max="1" step="0.1" value="0.9">
+            </div>
+            
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>Reset Rate</span>
+                    <span id="resetValue">0.4</span>
+                </div>
+                <input type="range" class="slider" id="resetSlider" 
+                       min="0.1" max="1" step="0.1" value="0.4">
+            </div>
+        </div>
+        
+        <!-- Actions -->
+        <div class="control-section">
+            <button class="btn btn-secondary" onclick="resetView()">🔄 Reset View</button>
+            <button class="btn btn-secondary" onclick="toggleWindLayer()">🌬️ Toggle Wind</button>
+        </div>
+    </div>
+    
+    <!-- Legend -->
+    <div class="legend">
+        <div class="legend-title">Wind Speed (m/s)</div>
+        <div class="legend-gradient"></div>
+        <div class="legend-labels">
+            <span>0</span>
+            <span>20</span>
+            <span>40</span>
+            <span>60</span>
+            <span>70+</span>
+        </div>
+    </div>
+    
+    <!-- Loading Spinner -->
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+    </div>
+
+    <script>
+        // Set Mapbox access token
+        mapboxgl.accessToken = '{{ mapbox_token }}';
+        
+        // Initialize the map
+        const map = new mapboxgl.Map({
+            container: 'map',
+            style: 'mapbox://styles/mapbox/dark-v11',
+            center: [-28, 47],
+            zoom: 2,
+            maxZoom: 8,
+            minZoom: 1
+        });
+        
+        let windLayerVisible = true;
+        
+        // Wait for map to load
+        map.on('load', () => {
+            console.log('Map loaded, adding wind layer...');
+            
+            // Add the wind source
+            map.addSource('raster-array-source', {
+                'type': 'raster-array',
+                'url': 'mapbox://mapbox.gfs-winds',
+                'tileSize': 512
+            });
+            
+            // Add the wind particle layer
+            map.addLayer({
+                'id': 'wind-layer',
+                'type': 'raster-particle',
+                'source': 'raster-array-source',
+                'source-layer': '10winds',
+                'paint': {
+                    'raster-particle-speed-factor': 0.4,
+                    'raster-particle-fade-opacity-factor': 0.9,
+                    'raster-particle-reset-rate-factor': 0.4,
+                    'raster-particle-count': 4000,
+                    'raster-particle-max-speed': 40,
+                    'raster-particle-color': [
+                        'interpolate',
+                        ['linear'],
+                        ['raster-particle-speed'],
+                        1.5, 'rgba(134,163,171,256)',
+                        2.5, 'rgba(126,152,188,256)',
+                        4.12, 'rgba(110,143,208,256)',
+                        4.63, 'rgba(110,143,208,256)',
+                        6.17, 'rgba(15,147,167,256)',
+                        7.72, 'rgba(15,147,167,256)',
+                        9.26, 'rgba(57,163,57,256)',
+                        10.29, 'rgba(57,163,57,256)',
+                        11.83, 'rgba(194,134,62,256)',
+                        13.37, 'rgba(194,134,63,256)',
+                        14.92, 'rgba(200,66,13,256)',
+                        16.46, 'rgba(200,66,13,256)',
+                        18.0, 'rgba(210,0,50,256)',
+                        20.06, 'rgba(215,0,50,256)',
+                        21.6, 'rgba(175,80,136,256)',
+                        23.66, 'rgba(175,80,136,256)',
+                        25.21, 'rgba(117,74,147,256)',
+                        27.78, 'rgba(117,74,147,256)',
+                        29.32, 'rgba(68,105,141,256)',
+                        31.89, 'rgba(68,105,141,256)',
+                        33.44, 'rgba(194,251,119,256)',
+                        42.18, 'rgba(194,251,119,256)',
+                        43.72, 'rgba(241,255,109,256)',
+                        48.87, 'rgba(241,255,109,256)',
+                        50.41, 'rgba(256,256,256,256)',
+                        57.61, 'rgba(256,256,256,256)',
+                        59.16, 'rgba(0,256,256,256)',
+                        68.93, 'rgba(0,256,256,256)',
+                        69.44, 'rgba(256,37,256,256)'
+                    ]
+                }
+            });
+            
+            console.log('Wind layer added successfully');
+        });
+        
+        // Handle map errors
+        map.on('error', (e) => {
+            console.error('Map error:', e);
+        });
+        
+        // Setup control event listeners
+        document.getElementById('speedSlider').addEventListener('input', function(e) {
+            const value = parseFloat(e.target.value);
+            document.getElementById('speedValue').textContent = value;
+            if (map.getLayer('wind-layer')) {
+                map.setPaintProperty('wind-layer', 'raster-particle-speed-factor', value);
+            }
+        });
+        
+        document.getElementById('particleSlider').addEventListener('input', function(e) {
+            const value = parseInt(e.target.value);
+            document.getElementById('particleValue').textContent = value;
+            if (map.getLayer('wind-layer')) {
+                map.setPaintProperty('wind-layer', 'raster-particle-count', value);
+            }
+        });
+        
+        document.getElementById('fadeSlider').addEventListener('input', function(e) {
+            const value = parseFloat(e.target.value);
+            document.getElementById('fadeValue').textContent = value;
+            if (map.getLayer('wind-layer')) {
+                map.setPaintProperty('wind-layer', 'raster-particle-fade-opacity-factor', value);
+            }
+        });
+        
+        document.getElementById('resetSlider').addEventListener('input', function(e) {
+            const value = parseFloat(e.target.value);
+            document.getElementById('resetValue').textContent = value;
+            if (map.getLayer('wind-layer')) {
+                map.setPaintProperty('wind-layer', 'raster-particle-reset-rate-factor', value);
+            }
+        });
+        
+        // File upload handling
+        document.addEventListener('DOMContentLoaded', function() {
+            const uploadBtn = document.getElementById('uploadBtn');
+            const fileInput = document.getElementById('fileInput');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressFill = document.getElementById('progressFill');
+            const uploadStatus = document.getElementById('uploadStatus');
+            
+            // Debug log
+            console.log('Upload button:', uploadBtn);
+            console.log('File input:', fileInput);
+            
+            if (uploadBtn && fileInput) {
+                uploadBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    console.log('Upload button clicked');
+                    fileInput.click();
+                });
+                
+                fileInput.addEventListener('change', async function(e) {
+                    const file = e.target.files[0];
+                    console.log('File selected:', file);
+                    
+                    if (!file) return;
+                    
+                    if (!file.name.endsWith('.nc')) {
+                        showNotification('Please select a NetCDF (.nc) file', 'error');
+                        return;
+                    }
+                    
+                    progressContainer.style.display = 'block';
+                    updateProgress(0, 'Preparing upload...');
+                    
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('create_tileset', 'true');
+                    
+                    try {
+                        updateProgress(10, 'Uploading file...');
+                        
+                        const response = await fetch('/api/upload-netcdf', {
+                            method: 'POST',
+                            body: formData
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error(`Upload failed: ${response.statusText}`);
+                        }
+                        
+                        const result = await response.json();
+                        console.log('Upload result:', result);
+                        
+                        if (result.success) {
+                            updateProgress(50, 'Processing NetCDF data...');
+                            showNotification('File uploaded successfully!', 'success');
+                            
+                            // Display some metadata
+                            let info = `Variables: ${result.metadata.variables.length}`;
+                            if (result.vector_pairs && result.vector_pairs.length > 0) {
+                                info += `, Wind fields: ${result.vector_pairs.length}`;
+                            }
+                            updateProgress(75, info);
+                            
+                            if (result.status === 'processing') {
+                                checkProcessingStatus(result.job_id);
+                            } else {
+                                updateProgress(100, 'Upload complete!');
+                                setTimeout(() => {
+                                    progressContainer.style.display = 'none';
+                                    fileInput.value = '';
+                                }, 2000);
+                            }
+                        } else {
+                            throw new Error(result.error || 'Upload failed');
+                        }
+                    } catch (error) {
+                        console.error('Upload error:', error);
+                        showNotification(`Upload failed: ${error.message}`, 'error');
+                        progressContainer.style.display = 'none';
+                        fileInput.value = '';
+                    }
+                });
+            } else {
+                console.error('Upload button or file input not found!');
+            }
+        });
+        
+        // Notification function
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.className = `notification ${type}`;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.style.opacity = '0';
+                notification.style.transition = 'opacity 0.3s ease';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+        
+        async function checkProcessingStatus(jobId) {
+            const checkInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/api/visualization-status/${jobId}`);
+                    const status = await response.json();
+                    
+                    if (status.status === 'completed') {
+                        clearInterval(checkInterval);
+                        updateProgress(100, 'Processing complete!');
+                        showNotification('NetCDF file processed successfully!', 'success');
+                        
+                        // Add to selector
+                        const selector = document.getElementById('tilesetSelector');
+                        const option = document.createElement('option');
+                        option.value = status.tileset_id || status.mapbox_tileset;
+                        option.textContent = `Uploaded: ${status.tileset_id}`;
+                        selector.appendChild(option);
+                        
+                        setTimeout(() => {
+                            progressContainer.style.display = 'none';
+                            fileInput.value = '';
+                        }, 2000);
+                    } else if (status.status === 'failed') {
+                        clearInterval(checkInterval);
+                        updateProgress(0, 'Processing failed');
+                        showNotification(`Processing failed: ${status.error}`, 'error');
+                        setTimeout(() => {
+                            progressContainer.style.display = 'none';
+                            fileInput.value = '';
+                        }, 2000);
+                    } else {
+                        updateProgress(85, 'Creating Mapbox tileset...');
+                    }
+                } catch (error) {
+                    clearInterval(checkInterval);
+                    showNotification('Status check failed', 'error');
+                    progressContainer.style.display = 'none';
+                }
+            }, 3000);
+        }
+        
+        function updateProgress(percent, message) {
+            const progressFill = document.getElementById('progressFill');
+            const uploadStatus = document.getElementById('uploadStatus');
+            if (progressFill && uploadStatus) {
+                progressFill.style.width = `${percent}%`;
+                progressFill.textContent = `${percent}%`;
+                uploadStatus.textContent = message;
+            }
+        }
+        
+        // Helper functions
+        function resetView() {
+            map.flyTo({
+                center: [-28, 47],
+                zoom: 2,
+                duration: 1500
+            });
+        }
+        
+        function toggleWindLayer() {
+            if (windLayerVisible) {
+                map.setLayoutProperty('wind-layer', 'visibility', 'none');
+                windLayerVisible = false;
+            } else {
+                map.setLayoutProperty('wind-layer', 'visibility', 'visible');
+                windLayerVisible = true;
+            }
+        }
+        
+        function showLoading(show) {
+            document.getElementById('loading').classList.toggle('active', show);
+        }
+        
+        // Tileset selector
+        document.getElementById('tilesetSelector').addEventListener('change', async function(e) {
+            if (e.target.value === 'mapbox.gfs-winds') {
+                // Already loaded
+                return;
+            }
+            
+            showLoading(true);
+            try {
+                // For custom tilesets, we'll need to implement loading logic
+                console.log('Loading tileset:', e.target.value);
+                // TODO: Implement custom tileset loading
+            } catch (error) {
+                console.error('Error loading tileset:', error);
+            } finally {
+                showLoading(false);
+            }
+        });
+    </script>
+</body>
+</html>
