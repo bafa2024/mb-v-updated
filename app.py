@@ -19,6 +19,10 @@ import logging
 import asyncio
 import subprocess
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import your existing modules
 from utils.recipe_generator import create_enhanced_recipe_for_netcdf
@@ -48,9 +52,15 @@ class Config:
     STATIC_DIR = Path("static")
     TEMPLATES_DIR = Path("templates")
     MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
+    
+    # Load Mapbox credentials from environment
     MAPBOX_USERNAME = os.getenv("MAPBOX_USERNAME", "")
     MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN", "")
-    MAPBOX_PUBLIC_TOKEN = os.getenv("MAPBOX_PUBLIC_TOKEN", MAPBOX_TOKEN)
+    MAPBOX_PUBLIC_TOKEN = os.getenv("MAPBOX_PUBLIC_TOKEN", "")
+    
+    # Use public token if available, otherwise fall back to main token
+    if not MAPBOX_PUBLIC_TOKEN and MAPBOX_TOKEN:
+        MAPBOX_PUBLIC_TOKEN = MAPBOX_TOKEN
     
 # Create directories
 for dir_path in [Config.UPLOAD_DIR, Config.PROCESSED_DIR, Config.RECIPE_DIR, 
@@ -58,8 +68,13 @@ for dir_path in [Config.UPLOAD_DIR, Config.PROCESSED_DIR, Config.RECIPE_DIR,
     dir_path.mkdir(exist_ok=True)
 
 # Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+app.mount("/static", StaticFiles(directory=str(Config.STATIC_DIR)), name="static")
+templates = Jinja2Templates(directory=str(Config.TEMPLATES_DIR))
+
+# Log configuration status
+logger.info(f"Mapbox Username: {Config.MAPBOX_USERNAME}")
+logger.info(f"Mapbox Token configured: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
+logger.info(f"Mapbox Public Token configured: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
 
 # Models
 class ProcessingStatus(BaseModel):
@@ -106,9 +121,12 @@ async def main_page(request: Request):
         except Exception as e:
             logger.error(f"Error fetching user tilesets: {e}")
     
+    # Log what we're passing to template
+    logger.info(f"Passing to template - Token: {Config.MAPBOX_PUBLIC_TOKEN[:10]}... Username: {Config.MAPBOX_USERNAME}")
+    
     return templates.TemplateResponse("main_weather_map.html", {
         "request": request,
-        "mapbox_token": Config.MAPBOX_PUBLIC_TOKEN,
+        "mapbox_token": Config.MAPBOX_PUBLIC_TOKEN,  # Use public token for client-side
         "mapbox_username": Config.MAPBOX_USERNAME,
         "available_tilesets": available_tilesets,
         "default_tileset": DEFAULT_TILESET
@@ -127,7 +145,12 @@ async def upload_netcdf(
     if not file.filename.endswith('.nc'):
         raise HTTPException(400, "Only NetCDF (.nc) files are allowed")
     
-    if file.size > Config.MAX_FILE_SIZE:
+    # Check file size
+    file_size = 0
+    content = await file.read()
+    file_size = len(content)
+    
+    if file_size > Config.MAX_FILE_SIZE:
         raise HTTPException(400, f"File too large. Maximum size is {Config.MAX_FILE_SIZE / 1024 / 1024}MB")
     
     # Create job
@@ -136,8 +159,9 @@ async def upload_netcdf(
     # Save uploaded file
     file_path = Config.UPLOAD_DIR / f"{job_id}_{file.filename}"
     async with aiofiles.open(file_path, 'wb') as f:
-        content = await file.read()
         await f.write(content)
+    
+    logger.info(f"Saved uploaded file: {file_path}")
     
     # Process file
     try:
@@ -160,6 +184,7 @@ async def upload_netcdf(
         
     except Exception as e:
         logger.error(f"Error processing file: {str(e)}")
+        logger.error(traceback.format_exc())
         return JSONResponse({
             "success": False,
             "error": str(e)
@@ -265,6 +290,13 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
 async def create_mapbox_tileset_background(file_path: Path, job_id: str, tileset_id: str):
     """Background task to create Mapbox tileset"""
     try:
+        if not Config.MAPBOX_TOKEN:
+            logger.error("Mapbox token not configured for tileset creation")
+            if job_id in active_visualizations:
+                active_visualizations[job_id]['status'] = 'failed'
+                active_visualizations[job_id]['error'] = 'Mapbox token not configured'
+            return
+            
         manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
         
         # Create recipe
@@ -344,15 +376,21 @@ async def load_tileset(tileset_id: str = Form(...)):
             })
         
         # Try to fetch from Mapbox
-        manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-        tileset_info = manager.get_tileset_status(tileset_id.split('.')[-1])
-        
-        return JSONResponse({
-            "success": True,
-            "tileset_id": tileset_id,
-            "type": "user",
-            "info": tileset_info
-        })
+        if Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
+            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            tileset_info = manager.get_tileset_status(tileset_id.split('.')[-1])
+            
+            return JSONResponse({
+                "success": True,
+                "tileset_id": tileset_id,
+                "type": "user",
+                "info": tileset_info
+            })
+        else:
+            return JSONResponse({
+                "success": False,
+                "error": "Mapbox credentials not configured"
+            }, status_code=500)
         
     except Exception as e:
         return JSONResponse({
@@ -373,7 +411,7 @@ def extract_visualization_config(recipe: Dict) -> Dict:
     
     # Extract scalar variables
     for band_name, info in bands_info.items():
-        if info['type'] == 'scalar':
+        if info.get('type') == 'scalar':
             config['variables'].append({
                 'name': band_name,
                 'display_name': info.get('long_name', band_name),
@@ -420,65 +458,13 @@ async def get_active_visualizations():
         ]
     })
 
-@app.get("/api/wind-data/{tileset_id}")
-async def get_wind_data(
-    tileset_id: str,
-    west: float = -180,
-    south: float = -90,
-    east: float = 180,
-    north: float = 90,
-    resolution: int = 50
-):
-    """Get wind grid data for particle animation"""
-    try:
-        # For default tileset, return simulated data
-        if tileset_id == DEFAULT_TILESET['id'] or 'gfs-winds' in tileset_id:
-            return generate_simulated_wind_data(west, south, east, north, resolution)
-        
-        # For user tilesets, extract from stored data or generate
-        # This would normally query the actual tileset data
-        return generate_simulated_wind_data(west, south, east, north, resolution)
-        
-    except Exception as e:
-        return JSONResponse({
-            "error": str(e)
-        }, status_code=500)
-
-def generate_simulated_wind_data(west: float, south: float, east: float, north: float, resolution: int) -> Dict:
-    """Generate simulated wind data for demo purposes"""
-    lats = np.linspace(south, north, resolution)
-    lons = np.linspace(west, east, resolution)
-    lon_grid, lat_grid = np.meshgrid(lons, lats)
-    
-    # Simulate realistic wind patterns
-    u_component = 10 * np.sin(lon_grid * 0.05) * np.cos(lat_grid * 0.05)
-    v_component = 10 * np.cos(lon_grid * 0.05) * np.sin(lat_grid * 0.05)
-    
-    # Add some noise for realism
-    u_component += np.random.randn(*u_component.shape) * 2
-    v_component += np.random.randn(*v_component.shape) * 2
-    
-    return {
-        "success": True,
-        "grid": {
-            "lats": lats.tolist(),
-            "lons": lons.tolist(),
-            "shape": [resolution, resolution]
-        },
-        "u_component": u_component.tolist(),
-        "v_component": v_component.tolist(),
-        "metadata": {
-            "units": "m/s",
-            "generated_at": datetime.now().isoformat()
-        }
-    }
-
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
         "mapbox_configured": bool(Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME),
+        "mapbox_public_token": bool(Config.MAPBOX_PUBLIC_TOKEN),
         "active_jobs": len(active_visualizations),
         "version": "3.0.0"
     }
@@ -501,6 +487,10 @@ async def cleanup_old_files():
 # Schedule cleanup on startup
 @app.on_event("startup")
 async def startup_event():
+    logger.info("Starting Weather Visualization Platform...")
+    logger.info(f"Environment: Mapbox Username: {Config.MAPBOX_USERNAME}")
+    logger.info(f"Environment: Mapbox Token Set: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
+    logger.info(f"Environment: Mapbox Public Token Set: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
     await cleanup_old_files()
 
 if __name__ == "__main__":
