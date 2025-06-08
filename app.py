@@ -156,8 +156,23 @@ async def upload_netcdf(
     # Create job
     job_id = datetime.now().strftime("%Y%m%d%H%M%S")
     
-    # Save uploaded file
-    file_path = Config.UPLOAD_DIR / f"{job_id}_{file.filename}"
+    # Sanitize filename before saving
+    original_filename = file.filename
+    # Remove any path components and get just the filename
+    safe_filename = Path(original_filename).name
+    # Replace special characters with underscores
+    safe_filename = ''.join(c if c.isalnum() or c in '.-_' else '_' for c in safe_filename)
+    # Ensure it ends with .nc
+    if not safe_filename.endswith('.nc'):
+        safe_filename = safe_filename.rsplit('.', 1)[0] + '.nc'
+    
+    # Save uploaded file with sanitized name
+    file_path = Config.UPLOAD_DIR / f"{job_id}_{safe_filename}"
+    
+    logger.info(f"Original filename: {original_filename}")
+    logger.info(f"Sanitized filename: {safe_filename}")
+    logger.info(f"Full file path: {file_path}")
+    
     async with aiofiles.open(file_path, 'wb') as f:
         await f.write(content)
     
@@ -233,12 +248,41 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         
         scalar_vars = [v for v in metadata['variables'] if v not in processed_vars]
         
-        # Generate tileset ID
+        # Generate tileset ID that meets Mapbox requirements
         if not tileset_name:
-            tileset_name = Path(file_path).stem.lower()
-            tileset_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in tileset_name)
+            # Get just the filename without path and extension
+            filename = Path(file_path).stem
+            # Remove all special characters and spaces
+            tileset_name = ''.join(c for c in filename if c.isalnum() or c in '-_')
+            if not tileset_name:  # If nothing left, use default
+                tileset_name = "netcdf_data"
         
-        tileset_id = f"weather_{tileset_name}_{job_id}"[:32]
+        # Ensure tileset name is lowercase and properly formatted
+        tileset_name = tileset_name.lower()
+        # Replace any remaining special chars with underscore
+        tileset_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in tileset_name)
+        # Remove multiple underscores
+        tileset_name = '_'.join(part for part in tileset_name.split('_') if part)
+        
+        # Create a shorter tileset ID to ensure it's under 32 chars
+        # Format: wx_[name]_[timestamp]  (wx = weather, shorter prefix)
+        timestamp = datetime.now().strftime("%m%d%H%M")  # Even shorter timestamp
+        prefix = "wx"
+        max_name_length = 32 - len(prefix) - len(timestamp) - 2  # 2 for underscores
+        
+        if len(tileset_name) > max_name_length:
+            tileset_name = tileset_name[:max_name_length]
+        
+        tileset_id = f"{prefix}_{tileset_name}_{timestamp}"
+        
+        # Final validation
+        tileset_id = tileset_id.lower()
+        tileset_id = ''.join(c for c in tileset_id if c.isalnum() or c in '-_')
+        tileset_id = tileset_id[:32]
+        
+        logger.info(f"Original filename: {Path(file_path).name}")
+        logger.info(f"Sanitized tileset_name: {tileset_name}")
+        logger.info(f"Final tileset_id: {tileset_id} (length: {len(tileset_id)})")
         
         # Create previews for first few variables
         previews = {}

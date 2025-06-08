@@ -30,6 +30,14 @@ class MapboxTilesetManager:
     def create_tileset_source(self, source_id: str, file_path: str) -> Dict[str, Any]:
         """Upload source data to Mapbox"""
         try:
+            # Sanitize source_id to meet Mapbox requirements
+            # Must be 32 chars or less, only a-z, 0-9, -, _
+            source_id = source_id.lower()
+            source_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in source_id)
+            source_id = source_id[:32]  # Truncate to 32 characters
+            
+            logger.info(f"Sanitized source_id: {source_id}")
+            
             # First, create the source
             create_url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
             
@@ -151,8 +159,13 @@ class MapboxTilesetManager:
             if not geojson_path:
                 return {"success": False, "error": "Failed to convert NetCDF to GeoJSON"}
             
-            # Step 2: Create tileset source
-            source_id = f"{tileset_id}_source"
+            # Step 2: Create tileset source with sanitized ID
+            # Source ID must be different from tileset ID and also sanitized
+            source_id = f"{tileset_id}_src"
+            source_id = source_id.lower()
+            source_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in source_id)
+            source_id = source_id[:32]  # Ensure it's no more than 32 chars
+            
             source_result = self.create_tileset_source(source_id, geojson_path)
             
             if not source_result["success"]:
@@ -164,7 +177,11 @@ class MapboxTilesetManager:
                 "type": "geojson"
             }]
             
-            # Step 4: Create tileset
+            # Step 4: Create tileset (also ensure tileset_id is sanitized)
+            tileset_id = tileset_id.lower()
+            tileset_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in tileset_id)
+            tileset_id = tileset_id[:32]
+            
             tileset_result = self.create_tileset(tileset_id, recipe)
             
             if not tileset_result["success"]:

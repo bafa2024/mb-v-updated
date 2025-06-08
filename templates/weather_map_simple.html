@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Weather Visualization - Simplified</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: Arial, sans-serif; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; }
+        
+        .control-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 20px;
+            border-radius: 8px;
+            width: 320px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+            z-index: 1000;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+        }
+        
+        .btn {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            width: 100%;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+        }
+        
+        .btn:hover {
+            background: #2563eb;
+            transform: translateY(-1px);
+        }
+        
+        .btn-success {
+            background: #10b981;
+        }
+        
+        .btn-success:hover {
+            background: #059669;
+        }
+        
+        .btn-danger {
+            background: #ef4444;
+        }
+        
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+        
+        .info-section {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+            font-size: 13px;
+        }
+        
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+        
+        .info-label {
+            color: #9ca3af;
+        }
+        
+        .info-value {
+            font-weight: 600;
+        }
+        
+        #windCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            pointer-events: none;
+            z-index: 10;
+        }
+        
+        .legend {
+            position: absolute;
+            bottom: 30px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 1000;
+        }
+        
+        .legend-gradient {
+            width: 200px;
+            height: 20px;
+            background: linear-gradient(to right, 
+                #3b82f6 0%, 
+                #10b981 25%, 
+                #f59e0b 50%, 
+                #ef4444 75%, 
+                #8b5cf6 100%
+            );
+            margin: 10px 0;
+            border-radius: 3px;
+        }
+        
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .loading.active {
+            display: block;
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 30px;
+            height: 30px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top-color: #3b82f6;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        .slider-container {
+            margin: 15px 0;
+        }
+        
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+        
+        .slider {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.2);
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #3b82f6;
+            cursor: pointer;
+        }
+        
+        .notification {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 6px;
+            z-index: 2000;
+            animation: slideDown 0.3s ease;
+        }
+        
+        @keyframes slideDown {
+            from {
+                transform: translateX(-50%) translateY(-20px);
+                opacity: 0;
+            }
+        }
+        
+        .notification.success {
+            border-left: 4px solid #10b981;
+        }
+        
+        .notification.error {
+            border-left: 4px solid #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <canvas id="windCanvas"></canvas>
+    
+    <div class="control-panel">
+        <h3>🌍 Weather Visualization</h3>
+        
+        <!-- Upload Section -->
+        <div>
+            <button class="btn btn-success" onclick="document.getElementById('fileInput').click()">
+                📤 Upload NetCDF File
+            </button>
+            <input type="file" id="fileInput" accept=".nc" style="display: none;" onchange="handleFileUpload(this)">
+        </div>
+        
+        <!-- File Info -->
+        <div id="fileInfo" style="display: none;">
+            <div class="info-section">
+                <h4 style="margin-top: 0;">File Information</h4>
+                <div id="fileDetails"></div>
+            </div>
+            
+            <!-- Wind Controls -->
+            <div id="windControls" style="display: none;">
+                <h4>Wind Visualization</h4>
+                
+                <div class="slider-container">
+                    <div class="slider-label">
+                        <span>Animation Speed</span>
+                        <span id="speedValue">1</span>
+                    </div>
+                    <input type="range" class="slider" id="speedSlider" 
+                           min="0.1" max="3" step="0.1" value="1"
+                           oninput="updateWindSpeed(this.value)">
+                </div>
+                
+                <div class="slider-container">
+                    <div class="slider-label">
+                        <span>Particle Count</span>
+                        <span id="particleValue">5000</span>
+                    </div>
+                    <input type="range" class="slider" id="particleSlider" 
+                           min="1000" max="10000" step="500" value="5000"
+                           oninput="updateParticleCount(this.value)">
+                </div>
+                
+                <button class="btn" onclick="toggleWindAnimation()">
+                    <span id="windToggleText">⏸️ Pause</span> Animation
+                </button>
+            </div>
+            
+            <button class="btn btn-danger" onclick="clearData()">
+                🗑️ Clear Data
+            </button>
+        </div>
+        
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="margin-top: 10px;">Processing...</p>
+        </div>
+    </div>
+    
+    <div class="legend" id="legend" style="display: none;">
+        <div style="font-weight: bold; margin-bottom: 5px;">Wind Speed (m/s)</div>
+        <div class="legend-gradient"></div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px;">
+            <span>0</span>
+            <span>10</span>
+            <span>20</span>
+            <span>30</span>
+            <span>40+</span>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let map;
+        let currentSession = null;
+        let windData = null;
+        let windAnimation = null;
+        let animationPaused = false;
+        let particles = [];
+        let particleCount = 5000;
+        let speedFactor = 1;
+        
+        // Initialize map
+        mapboxgl.accessToken = '{{ mapbox_token }}';
+        
+        map = new mapboxgl.Map({
+            container: 'map',
+            style: 'mapbox://styles/mapbox/dark-v11',
+            center: [0, 0],
+            zoom: 2
+        });
+        
+        map.on('load', () => {
+            console.log('Map loaded');
+            setupWindCanvas();
+        });
+        
+        // Setup wind animation canvas
+        function setupWindCanvas() {
+            const canvas = document.getElementById('windCanvas');
+            const mapCanvas = map.getCanvas();
+            canvas.width = mapCanvas.width;
+            canvas.height = mapCanvas.height;
+            
+            // Resize canvas when map resizes
+            map.on('resize', () => {
+                canvas.width = mapCanvas.width;
+                canvas.height = mapCanvas.height;
+            });
+        }
+        
+        // File upload handler
+        async function handleFileUpload(input) {
+            const file = input.files[0];
+            if (!file) return;
+            
+            if (!file.name.endsWith('.nc')) {
+                showNotification('Please select a NetCDF (.nc) file', 'error');
+                return;
+            }
+            
+            showLoading(true);
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch('/api/upload-netcdf', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    const error = await response.text();
+                    throw new Error(error);
+                }
+                
+                const result = await response.json();
+                console.log('Upload result:', result);
+                
+                if (result.success) {
+                    currentSession = result.session_id;
+                    displayFileInfo(result);
+                    
+                    // Fit map to data bounds
+                    if (result.bounds) {
+                        map.fitBounds([
+                            [result.bounds.west, result.bounds.south],
+                            [result.bounds.east, result.bounds.north]
+                        ], { padding: 50 });
+                    }
+                    
+                    // Load wind data if available
+                    if (result.wind_components) {
+                        await loadWindData();
+                    }
+                    
+                    showNotification('File loaded successfully!', 'success');
+                } else {
+                    throw new Error(result.error || 'Upload failed');
+                }
+            } catch (error) {
+                console.error('Upload error:', error);
+                showNotification(`Error: ${error.message}`, 'error');
+            } finally {
+                showLoading(false);
+                input.value = '';
+            }
+        }
+        
+        // Display file information
+        function displayFileInfo(data) {
+            document.getElementById('fileInfo').style.display = 'block';
+            
+            let html = '<div class="info-row"><span class="info-label">Variables:</span>' +
+                      `<span class="info-value">${data.metadata.variables.length}</span></div>`;
+            
+            if (data.metadata.dimensions) {
+                const dims = Object.entries(data.metadata.dimensions)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join(', ');
+                html += '<div class="info-row"><span class="info-label">Dimensions:</span>' +
+                       `<span class="info-value">${dims}</span></div>`;
+            }
+            
+            if (data.wind_components) {
+                html += '<div class="info-row"><span class="info-label">Wind fields:</span>' +
+                       `<span class="info-value">${data.wind_components.u}, ${data.wind_components.v}</span></div>`;
+                document.getElementById('windControls').style.display = 'block';
+                document.getElementById('legend').style.display = 'block';
+            }
+            
+            document.getElementById('fileDetails').innerHTML = html;
+        }
+        
+        // Load wind data from server
+        async function loadWindData() {
+            if (!currentSession) return;
+            
+            try {
+                const response = await fetch(`/api/wind-data/${currentSession}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    windData = data;
+                    startWindAnimation();
+                }
+            } catch (error) {
+                console.error('Error loading wind data:', error);
+            }
+        }
+        
+        // Wind animation using canvas
+        function startWindAnimation() {
+            if (!windData) return;
+            
+            const canvas = document.getElementById('windCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Initialize particles
+            particles = [];
+            for (let i = 0; i < particleCount; i++) {
+                particles.push(createParticle());
+            }
+            
+            // Animation loop
+            function animate() {
+                if (!animationPaused) {
+                    // Clear canvas with fade effect
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Update and draw particles
+                    particles.forEach(particle => {
+                        updateParticle(particle);
+                        drawParticle(ctx, particle);
+                    });
+                }
+                
+                windAnimation = requestAnimationFrame(animate);
+            }
+            
+            animate();
+        }
+        
+        function createParticle() {
+            const bounds = map.getBounds();
+            return {
+                lon: Math.random() * (bounds.getEast() - bounds.getWest()) + bounds.getWest(),
+                lat: Math.random() * (bounds.getNorth() - bounds.getSouth()) + bounds.getSouth(),
+                age: 0,
+                maxAge: 100 + Math.random() * 100
+            };
+        }
+        
+        function updateParticle(particle) {
+            // Get wind velocity at particle position
+            const velocity = getWindVelocity(particle.lon, particle.lat);
+            
+            if (velocity) {
+                // Update position based on wind
+                const speed = Math.sqrt(velocity.u * velocity.u + velocity.v * velocity.v);
+                const scale = 0.0001 * speedFactor; // Adjust for map scale
+                
+                particle.lon += velocity.u * scale;
+                particle.lat += velocity.v * scale;
+                particle.speed = speed;
+            }
+            
+            particle.age++;
+            
+            // Reset particle if out of bounds or too old
+            const bounds = map.getBounds();
+            if (particle.age > particle.maxAge ||
+                particle.lon < bounds.getWest() || particle.lon > bounds.getEast() ||
+                particle.lat < bounds.getSouth() || particle.lat > bounds.getNorth()) {
+                Object.assign(particle, createParticle());
+            }
+        }
+        
+        function drawParticle(ctx, particle) {
+            const point = map.project([particle.lon, particle.lat]);
+            
+            // Color based on speed
+            const speed = particle.speed || 0;
+            const hue = 220 - Math.min(speed * 4, 220); // Blue to red
+            const opacity = 1 - (particle.age / particle.maxAge);
+            
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, 1, 0, 2 * Math.PI);
+            ctx.fillStyle = `hsla(${hue}, 80%, 60%, ${opacity})`;
+            ctx.fill();
+        }
+        
+        function getWindVelocity(lon, lat) {
+            if (!windData) return null;
+            
+            // Find nearest grid point (simple nearest neighbor)
+            const lons = windData.grid.lons;
+            const lats = windData.grid.lats;
+            
+            let minDist = Infinity;
+            let nearestI = 0, nearestJ = 0;
+            
+            for (let i = 0; i < lats.length; i++) {
+                for (let j = 0; j < lons.length; j++) {
+                    const dist = Math.abs(lats[i] - lat) + Math.abs(lons[j] - lon);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestI = i;
+                        nearestJ = j;
+                    }
+                }
+            }
+            
+            return {
+                u: windData.u_component[nearestI][nearestJ],
+                v: windData.v_component[nearestI][nearestJ]
+            };
+        }
+        
+        // Control functions
+        function updateWindSpeed(value) {
+            speedFactor = parseFloat(value);
+            document.getElementById('speedValue').textContent = value;
+        }
+        
+        function updateParticleCount(value) {
+            particleCount = parseInt(value);
+            document.getElementById('particleValue').textContent = value;
+            
+            // Adjust particle array
+            while (particles.length < particleCount) {
+                particles.push(createParticle());
+            }
+            while (particles.length > particleCount) {
+                particles.pop();
+            }
+        }
+        
+        function toggleWindAnimation() {
+            animationPaused = !animationPaused;
+            document.getElementById('windToggleText').textContent = animationPaused ? '▶️ Play' : '⏸️ Pause';
+        }
+        
+        async function clearData() {
+            if (currentSession) {
+                // Clean up server session
+                try {
+                    await fetch(`/api/session/${currentSession}`, { method: 'DELETE' });
+                } catch (error) {
+                    console.error('Error cleaning up session:', error);
+                }
+            }
+            
+            // Stop animation
+            if (windAnimation) {
+                cancelAnimationFrame(windAnimation);
+                windAnimation = null;
+            }
+            
+            // Clear canvas
+            const canvas = document.getElementById('windCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Reset UI
+            currentSession = null;
+            windData = null;
+            particles = [];
+            document.getElementById('fileInfo').style.display = 'none';
+            document.getElementById('legend').style.display = 'none';
+            
+            // Reset map view
+            map.flyTo({ center: [0, 0], zoom: 2 });
+            
+            showNotification('Data cleared', 'success');
+        }
+        
+        function showLoading(show) {
+            document.getElementById('loading').classList.toggle('active', show);
+        }
+        
+        function showNotification(message, type = 'info') {
+            const notification = document.createElement('div');
+            notification.className = 'notification ' + type;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.style.opacity = '0';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+        
+        // Update canvas on map move
+        map.on('move', () => {
+            if (windAnimation && !animationPaused) {
+                const canvas = document.getElementById('windCanvas');
+                const ctx = canvas.getContext('2d');
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            }
+        });
+    </script>
+</body>
+</html>
