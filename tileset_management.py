@@ -41,9 +41,9 @@ class MapboxTilesetManager:
             # First, create the source
             create_url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
             
-            # Upload the file
+            # Upload the file with correct content type for line-delimited JSON
             with open(file_path, 'rb') as f:
-                files = {'file': (Path(file_path).name, f, 'application/x-netcdf')}
+                files = {'file': (Path(file_path).name, f, 'application/x-ndjson')}
                 response = requests.post(create_url, files=files)
                 
             if response.status_code == 200:
@@ -171,18 +171,25 @@ class MapboxTilesetManager:
             if not source_result["success"]:
                 return source_result
             
-            # Step 3: Update recipe with source
-            recipe["sources"] = [{
-                "id": source_result["source_id"],
-                "type": "geojson"
-            }]
+            # Step 3: Create a simple recipe that Mapbox will accept
+            # Use a minimal recipe structure
+            simple_recipe = {
+                "version": 1,
+                "layers": {
+                    "data": {
+                        "source": f"mapbox://tileset-source/{self.username}/{source_id}",
+                        "minzoom": 0,
+                        "maxzoom": 5
+                    }
+                }
+            }
             
             # Step 4: Create tileset (also ensure tileset_id is sanitized)
             tileset_id = tileset_id.lower()
             tileset_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in tileset_id)
             tileset_id = tileset_id[:32]
             
-            tileset_result = self.create_tileset(tileset_id, recipe)
+            tileset_result = self.create_tileset(tileset_id, simple_recipe)
             
             if not tileset_result["success"]:
                 return tileset_result
@@ -208,7 +215,7 @@ class MapboxTilesetManager:
             return {"success": False, "error": str(e)}
     
     def _convert_netcdf_to_geojson(self, netcdf_path: str) -> Optional[str]:
-        """Convert NetCDF to GeoJSON format"""
+        """Convert NetCDF to GeoJSON format (line-delimited for Mapbox)"""
         try:
             import xarray as xr
             import numpy as np
@@ -231,54 +238,46 @@ class MapboxTilesetManager:
             else:
                 raise ValueError("No latitude coordinate found")
             
-            # Create a simple point grid GeoJSON
-            features = []
-            
-            # Sample the data to avoid too many points
-            lat_step = max(1, len(lats) // 50)
-            lon_step = max(1, len(lons) // 50)
-            
-            # Get first variable for demo
-            var_names = list(ds.data_vars)
-            if var_names:
-                var_name = var_names[0]
-                data = ds[var_name]
-                
-                # Handle time dimension if present
-                if 'time' in data.dims:
-                    data = data.isel(time=0)
-                
-                # Create features
-                for i in range(0, len(lats), lat_step):
-                    for j in range(0, len(lons), lon_step):
-                        value = float(data.values[i, j])
-                        if not np.isnan(value):
-                            feature = {
-                                "type": "Feature",
-                                "geometry": {
-                                    "type": "Point",
-                                    "coordinates": [float(lons[j]), float(lats[i])]
-                                },
-                                "properties": {
-                                    var_name: value,
-                                    "lat": float(lats[i]),
-                                    "lon": float(lons[j])
-                                }
-                            }
-                            features.append(feature)
-            
-            # Create GeoJSON
-            geojson = {
-                "type": "FeatureCollection",
-                "features": features
-            }
-            
-            # Save to temporary file
+            # Create a temporary file for line-delimited GeoJSON
             temp_path = tempfile.mktemp(suffix='.geojson')
+            
             with open(temp_path, 'w') as f:
-                json.dump(geojson, f)
+                # Sample the data to avoid too many points
+                lat_step = max(1, len(lats) // 50)
+                lon_step = max(1, len(lons) // 50)
+                
+                # Get first variable for demo
+                var_names = list(ds.data_vars)
+                if var_names:
+                    var_name = var_names[0]
+                    data = ds[var_name]
+                    
+                    # Handle time dimension if present
+                    if 'time' in data.dims:
+                        data = data.isel(time=0)
+                    
+                    # Write features as line-delimited JSON (NOT FeatureCollection)
+                    for i in range(0, len(lats), lat_step):
+                        for j in range(0, len(lons), lon_step):
+                            value = float(data.values[i, j])
+                            if not np.isnan(value):
+                                feature = {
+                                    "type": "Feature",
+                                    "geometry": {
+                                        "type": "Point",
+                                        "coordinates": [float(lons[j]), float(lats[i])]
+                                    },
+                                    "properties": {
+                                        var_name: value,
+                                        "lat": float(lats[i]),
+                                        "lon": float(lons[j])
+                                    }
+                                }
+                                # Write each feature on its own line
+                                f.write(json.dumps(feature) + '\n')
             
             ds.close()
+            logger.info(f"Created line-delimited GeoJSON: {temp_path}")
             return temp_path
             
         except Exception as e:

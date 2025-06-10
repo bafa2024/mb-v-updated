@@ -25,7 +25,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import your existing modules
-from utils.recipe_generator import create_enhanced_recipe_for_netcdf
 from tileset_management import MapboxTilesetManager
 
 # Configure logging
@@ -343,23 +342,15 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str, tileset
             
         manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
         
-        # Create recipe
-        recipe = create_enhanced_recipe_for_netcdf(str(file_path), tileset_id, Config.MAPBOX_USERNAME)
-        
-        # Save recipe
-        recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
-        with open(recipe_path, 'w') as f:
-            json.dump(recipe, f, indent=2)
-        
-        # Upload to Mapbox
-        result = manager.process_netcdf_to_tileset(str(file_path), tileset_id, recipe)
+        # Don't use the complex recipe generator - it will be handled in the manager
+        # Just pass the basic info
+        result = manager.process_netcdf_to_tileset(str(file_path), tileset_id, {})
         
         if result['success']:
             # Update visualization info
             if job_id in active_visualizations:
                 active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
                 active_visualizations[job_id]['status'] = 'completed'
-                active_visualizations[job_id]['recipe'] = recipe
         else:
             if job_id in active_visualizations:
                 active_visualizations[job_id]['status'] = 'failed'
