@@ -109,7 +109,8 @@ async def main_page(request: Request):
             manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             user_tilesets = manager.list_tilesets(limit=10)
             for ts in user_tilesets:
-                if 'weather' in ts.get('name', '').lower() or 'netcdf' in ts.get('name', '').lower():
+                # Include all user tilesets that might be weather-related
+                if any(keyword in ts.get('name', '').lower() for keyword in ['weather', 'netcdf', 'wx_', 'wind', 'flow']):
                     available_tilesets.append({
                         "id": ts['id'],
                         "name": ts.get('name', ts['id']),
@@ -121,7 +122,8 @@ async def main_page(request: Request):
             logger.error(f"Error fetching user tilesets: {e}")
     
     # Log what we're passing to template
-    logger.info(f"Passing to template - Token: {Config.MAPBOX_PUBLIC_TOKEN[:10]}... Username: {Config.MAPBOX_USERNAME}")
+    logger.info(f"Passing to template - Token: {Config.MAPBOX_PUBLIC_TOKEN[:10] if Config.MAPBOX_PUBLIC_TOKEN else 'None'}... Username: {Config.MAPBOX_USERNAME}")
+    logger.info(f"Available tilesets: {len(available_tilesets)}")
     
     return templates.TemplateResponse("main_weather_map.html", {
         "request": request,
@@ -351,6 +353,20 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str, tileset
             if job_id in active_visualizations:
                 active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
                 active_visualizations[job_id]['status'] = 'completed'
+                
+                # Save the recipe info for later reference
+                recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
+                recipe_data = {
+                    "tileset_id": tileset_id,
+                    "mapbox_tileset": result['tileset_id'],
+                    "created": datetime.now().isoformat(),
+                    "source_layer": "weather_data"  # This matches what's created in tileset_management
+                }
+                
+                with open(recipe_path, 'w') as f:
+                    json.dump(recipe_data, f, indent=2)
+                    
+                logger.info(f"Saved recipe info to {recipe_path}")
         else:
             if job_id in active_visualizations:
                 active_visualizations[job_id]['status'] = 'failed'
@@ -402,47 +418,53 @@ async def load_tileset(tileset_id: str = Form(...)):
         tileset_name = tileset_id.split('.')[-1] if '.' in tileset_id else tileset_id
         recipe_files = list(Config.RECIPE_DIR.glob(f"*{tileset_name}*.json"))
         
-        if recipe_files:
-            with open(recipe_files[0], 'r') as f:
-                recipe = json.load(f)
-            
-            # Extract the layer names from the recipe
-            layer_names = list(recipe.get('layers', {}).keys())
-            
-            # Find the wind/flow layer
-            wind_layer = None
-            for layer_name in layer_names:
-                if 'flow' in layer_name.lower() or 'wind' in layer_name.lower():
-                    wind_layer = layer_name
-                    break
-            
-            if not wind_layer and layer_names:
-                wind_layer = layer_names[0]  # Use first layer as fallback
-            
-            config = extract_visualization_config(recipe)
-            config['source_layer'] = wind_layer
-            
-            return JSONResponse({
-                "success": True,
-                "tileset_id": tileset_id,
-                "type": "user",
-                "recipe": recipe,
-                "config": config,
-                "source_layer": wind_layer
-            })
+        source_layer = "weather_data"  # Default source layer name from the recipe
         
-        # Try to fetch from Mapbox
+        if recipe_files:
+            try:
+                with open(recipe_files[0], 'r') as f:
+                    recipe_data = json.load(f)
+                
+                # Check if it's our simplified recipe format
+                if 'source_layer' in recipe_data:
+                    source_layer = recipe_data['source_layer']
+                # Check if it's the old complex recipe format
+                elif 'layers' in recipe_data:
+                    layers = recipe_data.get('layers', {})
+                    if layers:
+                        # Get the first layer name
+                        source_layer = list(layers.keys())[0]
+                
+                logger.info(f"Found recipe for {tileset_name}, using source layer: {source_layer}")
+                
+                return JSONResponse({
+                    "success": True,
+                    "tileset_id": tileset_id,
+                    "type": "user",
+                    "recipe": recipe_data,
+                    "config": {
+                        "source_layer": source_layer,
+                        "visualization_type": "points"
+                    },
+                    "source_layer": source_layer
+                })
+            except Exception as e:
+                logger.error(f"Error reading recipe file: {e}")
+        
+        # If no recipe found, try to get info from Mapbox
         if Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
             manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             tileset_info = manager.get_tileset_status(tileset_name)
             
-            # Default to flow_layer for uploaded data
+            logger.info(f"No recipe found for {tileset_name}, using default source layer: {source_layer}")
+            
+            # Default to weather_data for uploaded data
             return JSONResponse({
                 "success": True,
                 "tileset_id": tileset_id,
                 "type": "user",
                 "info": tileset_info,
-                "source_layer": "flow_layer"  # Default layer name
+                "source_layer": source_layer
             })
         else:
             return JSONResponse({
@@ -452,6 +474,7 @@ async def load_tileset(tileset_id: str = Form(...)):
         
     except Exception as e:
         logger.error(f"Error loading tileset: {str(e)}")
+        logger.error(traceback.format_exc())
         return JSONResponse({
             "success": False,
             "error": str(e)
@@ -506,6 +529,7 @@ async def get_active_visualizations():
             {
                 "job_id": job_id,
                 "tileset_id": viz.get('tileset_id'),
+                "mapbox_tileset": viz.get('mapbox_tileset'),
                 "status": viz.get('status', 'processing'),
                 "created_at": viz.get('created_at'),
                 "metadata": {
