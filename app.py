@@ -392,34 +392,57 @@ async def load_tileset(tileset_id: str = Form(...)):
                 "type": "default",
                 "config": {
                     "layers": ["wind"],
-                    "wind_source": tileset_id
+                    "wind_source": tileset_id,
+                    "source_layer": "10winds"
                 }
             })
         
         # For user tilesets, get the recipe
-        recipe_files = list(Config.RECIPE_DIR.glob(f"*{tileset_id}*.json"))
+        # Handle both full tileset IDs and partial IDs
+        tileset_name = tileset_id.split('.')[-1] if '.' in tileset_id else tileset_id
+        recipe_files = list(Config.RECIPE_DIR.glob(f"*{tileset_name}*.json"))
+        
         if recipe_files:
             with open(recipe_files[0], 'r') as f:
                 recipe = json.load(f)
+            
+            # Extract the layer names from the recipe
+            layer_names = list(recipe.get('layers', {}).keys())
+            
+            # Find the wind/flow layer
+            wind_layer = None
+            for layer_name in layer_names:
+                if 'flow' in layer_name.lower() or 'wind' in layer_name.lower():
+                    wind_layer = layer_name
+                    break
+            
+            if not wind_layer and layer_names:
+                wind_layer = layer_names[0]  # Use first layer as fallback
+            
+            config = extract_visualization_config(recipe)
+            config['source_layer'] = wind_layer
             
             return JSONResponse({
                 "success": True,
                 "tileset_id": tileset_id,
                 "type": "user",
                 "recipe": recipe,
-                "config": extract_visualization_config(recipe)
+                "config": config,
+                "source_layer": wind_layer
             })
         
         # Try to fetch from Mapbox
         if Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
             manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-            tileset_info = manager.get_tileset_status(tileset_id.split('.')[-1])
+            tileset_info = manager.get_tileset_status(tileset_name)
             
+            # Default to flow_layer for uploaded data
             return JSONResponse({
                 "success": True,
                 "tileset_id": tileset_id,
                 "type": "user",
-                "info": tileset_info
+                "info": tileset_info,
+                "source_layer": "flow_layer"  # Default layer name
             })
         else:
             return JSONResponse({
@@ -428,6 +451,7 @@ async def load_tileset(tileset_id: str = Form(...)):
             }, status_code=500)
         
     except Exception as e:
+        logger.error(f"Error loading tileset: {str(e)}")
         return JSONResponse({
             "success": False,
             "error": str(e)

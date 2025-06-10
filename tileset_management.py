@@ -153,7 +153,7 @@ class MapboxTilesetManager:
     def process_netcdf_to_tileset(self, netcdf_path: str, tileset_id: str, recipe: Dict) -> Dict[str, Any]:
         """Complete process to convert NetCDF to Mapbox tileset"""
         try:
-            # Step 1: Convert NetCDF to GeoJSON (you'll need to implement this based on your data)
+            # Step 1: Convert NetCDF to GeoJSON
             geojson_path = self._convert_netcdf_to_geojson(netcdf_path)
             
             if not geojson_path:
@@ -176,7 +176,7 @@ class MapboxTilesetManager:
             simple_recipe = {
                 "version": 1,
                 "layers": {
-                    "data": {
+                    "weather_data": {
                         "source": f"mapbox://tileset-source/{self.username}/{source_id}",
                         "minzoom": 0,
                         "maxzoom": 5
@@ -238,29 +238,58 @@ class MapboxTilesetManager:
             else:
                 raise ValueError("No latitude coordinate found")
             
+            # Find wind components
+            u_var = None
+            v_var = None
+            
+            for var in ds.data_vars:
+                var_lower = var.lower()
+                if any(pattern in var_lower for pattern in ['u', 'u10', 'u_wind', 'eastward']):
+                    u_var = var
+                elif any(pattern in var_lower for pattern in ['v', 'v10', 'v_wind', 'northward']):
+                    v_var = var
+            
+            if not u_var or not v_var:
+                logger.warning("No wind components found, using first two variables")
+                var_list = list(ds.data_vars)
+                if len(var_list) >= 2:
+                    u_var = var_list[0]
+                    v_var = var_list[1]
+                else:
+                    raise ValueError("Need at least 2 variables for wind visualization")
+            
+            logger.info(f"Using variables: U={u_var}, V={v_var}")
+            
             # Create a temporary file for line-delimited GeoJSON
             temp_path = tempfile.mktemp(suffix='.geojson')
             
             with open(temp_path, 'w') as f:
                 # Sample the data to avoid too many points
-                lat_step = max(1, len(lats) // 50)
-                lon_step = max(1, len(lons) // 50)
+                lat_step = max(1, len(lats) // 100)
+                lon_step = max(1, len(lons) // 100)
                 
-                # Get first variable for demo
-                var_names = list(ds.data_vars)
-                if var_names:
-                    var_name = var_names[0]
-                    data = ds[var_name]
-                    
-                    # Handle time dimension if present
-                    if 'time' in data.dims:
-                        data = data.isel(time=0)
-                    
-                    # Write features as line-delimited JSON (NOT FeatureCollection)
-                    for i in range(0, len(lats), lat_step):
-                        for j in range(0, len(lons), lon_step):
-                            value = float(data.values[i, j])
-                            if not np.isnan(value):
+                # Get wind data
+                u_data = ds[u_var]
+                v_data = ds[v_var]
+                
+                # Handle time dimension if present
+                if 'time' in u_data.dims:
+                    u_data = u_data.isel(time=0)
+                    v_data = v_data.isel(time=0)
+                
+                # Write features as line-delimited JSON (NOT FeatureCollection)
+                feature_count = 0
+                for i in range(0, len(lats), lat_step):
+                    for j in range(0, len(lons), lon_step):
+                        try:
+                            u_val = float(u_data.values[i, j])
+                            v_val = float(v_data.values[i, j])
+                            
+                            if not np.isnan(u_val) and not np.isnan(v_val):
+                                # Calculate wind speed and direction
+                                speed = np.sqrt(u_val**2 + v_val**2)
+                                direction = np.arctan2(v_val, u_val) * 180 / np.pi
+                                
                                 feature = {
                                     "type": "Feature",
                                     "geometry": {
@@ -268,20 +297,114 @@ class MapboxTilesetManager:
                                         "coordinates": [float(lons[j]), float(lats[i])]
                                     },
                                     "properties": {
-                                        var_name: value,
+                                        "u": u_val,
+                                        "v": v_val,
+                                        "speed": float(speed),
+                                        "direction": float(direction),
                                         "lat": float(lats[i]),
                                         "lon": float(lons[j])
                                     }
                                 }
                                 # Write each feature on its own line
                                 f.write(json.dumps(feature) + '\n')
+                                feature_count += 1
+                        except Exception as e:
+                            logger.warning(f"Skipping point ({i},{j}): {e}")
+                            continue
             
             ds.close()
-            logger.info(f"Created line-delimited GeoJSON: {temp_path}")
+            logger.info(f"Created line-delimited GeoJSON with {feature_count} features: {temp_path}")
             return temp_path
             
         except Exception as e:
             logger.error(f"Error converting NetCDF to GeoJSON: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _convert_netcdf_to_geotiff(self, netcdf_path: str) -> Optional[str]:
+        """Convert NetCDF to GeoTIFF format for raster-array tilesets"""
+        try:
+            import xarray as xr
+            import rasterio
+            from rasterio.transform import from_bounds
+            import numpy as np
+            
+            # Open NetCDF file
+            ds = xr.open_dataset(netcdf_path)
+            
+            # Find wind components
+            u_var = None
+            v_var = None
+            
+            for var in ds.data_vars:
+                var_lower = var.lower()
+                if any(pattern in var_lower for pattern in ['u', 'u10', 'u_wind', 'eastward']):
+                    u_var = var
+                elif any(pattern in var_lower for pattern in ['v', 'v10', 'v_wind', 'northward']):
+                    v_var = var
+            
+            if not u_var or not v_var:
+                logger.error("No wind components found in NetCDF")
+                return None
+            
+            # Get data
+            u_data = ds[u_var]
+            v_data = ds[v_var]
+            
+            # Handle time dimension
+            if 'time' in u_data.dims:
+                u_data = u_data.isel(time=0)
+                v_data = v_data.isel(time=0)
+            
+            # Get coordinates
+            if 'lon' in ds.coords:
+                lons = ds.coords['lon'].values
+            elif 'longitude' in ds.coords:
+                lons = ds.coords['longitude'].values
+            else:
+                raise ValueError("No longitude coordinate found")
+            
+            if 'lat' in ds.coords:
+                lats = ds.coords['lat'].values
+            elif 'latitude' in ds.coords:
+                lats = ds.coords['latitude'].values
+            else:
+                raise ValueError("No latitude coordinate found")
+            
+            # Create transform
+            transform = from_bounds(
+                lons.min(), lats.min(), lons.max(), lats.max(),
+                len(lons), len(lats)
+            )
+            
+            # Create temporary GeoTIFF with both bands
+            temp_path = tempfile.mktemp(suffix='.tif')
+            
+            with rasterio.open(
+                temp_path,
+                'w',
+                driver='GTiff',
+                height=len(lats),
+                width=len(lons),
+                count=2,  # Two bands for U and V
+                dtype='float32',
+                crs='EPSG:4326',
+                transform=transform
+            ) as dst:
+                dst.write(u_data.values.astype('float32'), 1)
+                dst.write(v_data.values.astype('float32'), 2)
+                
+                # Set band descriptions
+                dst.set_band_description(1, 'u_component')
+                dst.set_band_description(2, 'v_component')
+            
+            ds.close()
+            logger.info(f"Created GeoTIFF: {temp_path}")
+            return temp_path
+            
+        except Exception as e:
+            logger.error(f"Error converting NetCDF to GeoTIFF: {str(e)}")
             return None
     
     def check_job_status(self, tileset_id: str, job_id: str) -> Dict[str, Any]:

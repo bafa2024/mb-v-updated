@@ -222,6 +222,10 @@
             border-left: 4px solid #ef4444;
         }
         
+        .notification.info {
+            border-left: 4px solid #3b82f6;
+        }
+        
         .loading {
             display: none;
             position: absolute;
@@ -357,6 +361,8 @@
         // Global variables
         let map = null;
         let windLayerVisible = true;
+        let currentTilesetId = '{{ default_tileset.id }}';
+        let currentVisualizationType = 'particles'; // 'particles' or 'points'
         
         // Initialize everything when page loads
         window.addEventListener('load', function() {
@@ -391,13 +397,14 @@
                 map.on('load', function() {
                     console.log('Map loaded successfully');
                     addWindLayer();
+                    setupEventHandlers();
                 });
                 
                 // Handle errors
                 map.on('error', function(e) {
                     console.error('Map error:', e);
-                    if (e.error) {
-                        showNotification('Map error: ' + e.error.message, 'error');
+                    if (e.error && e.error.message) {
+                        console.log('Detailed error:', e.error.message);
                     }
                 });
                 
@@ -465,6 +472,7 @@
                     }
                 });
                 
+                currentVisualizationType = 'particles';
                 console.log('Wind layer added successfully');
                 showNotification('Wind visualization loaded', 'success');
                 
@@ -474,9 +482,219 @@
             }
         }
         
+        // Load custom tileset
+        async function loadTileset(tilesetId) {
+            if (!map) {
+                console.error('Map not initialized');
+                return;
+            }
+            
+            // If same tileset, do nothing
+            if (tilesetId === currentTilesetId) {
+                console.log('Tileset already loaded');
+                return;
+            }
+            
+            try {
+                // Remove existing layers and sources
+                if (map.getLayer('wind-layer')) {
+                    map.removeLayer('wind-layer');
+                }
+                if (map.getLayer('wind-points')) {
+                    map.removeLayer('wind-points');
+                }
+                if (map.getSource('raster-array-source')) {
+                    map.removeSource('raster-array-source');
+                }
+                if (map.getSource('custom-source')) {
+                    map.removeSource('custom-source');
+                }
+                
+                // Check if it's the default tileset
+                if (tilesetId === 'mapbox.gfs-winds') {
+                    // Reload default wind layer
+                    addWindLayer();
+                    currentTilesetId = tilesetId;
+                    showNotification('Default wind data loaded', 'success');
+                    return;
+                }
+                
+                // For custom tilesets, we need to load them differently
+                console.log('Loading custom tileset:', tilesetId);
+                
+                // Call the backend to get tileset info
+                const formData = new FormData();
+                formData.append('tileset_id', tilesetId);
+                
+                const response = await fetch('/api/load-tileset', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to load tileset information');
+                }
+                
+                const tilesetInfo = await response.json();
+                console.log('Tileset info:', tilesetInfo);
+                
+                if (!tilesetInfo.success) {
+                    throw new Error(tilesetInfo.error || 'Failed to load tileset');
+                }
+                
+                // Try to load as vector tileset with point visualization
+                try {
+                    // Add as vector source
+                    map.addSource('custom-source', {
+                        'type': 'vector',
+                        'url': `mapbox://${tilesetId}`
+                    });
+                    
+                    // Get the source layer name
+                    const sourceLayer = tilesetInfo.source_layer || tilesetInfo.config?.source_layer || 'weather_data';
+                    console.log('Using source layer:', sourceLayer);
+                    
+                    // Wait a moment for the source to load
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    
+                    // Add wind visualization as animated points
+                    map.addLayer({
+                        'id': 'wind-points',
+                        'type': 'circle',
+                        'source': 'custom-source',
+                        'source-layer': sourceLayer,
+                        'paint': {
+                            'circle-radius': [
+                                'interpolate',
+                                ['linear'],
+                                ['zoom'],
+                                2, 2,
+                                8, 6
+                            ],
+                            'circle-color': [
+                                'interpolate',
+                                ['linear'],
+                                ['coalesce', ['get', 'speed'], ['get', 'flow_speed'], 10],
+                                0, '#3b82f6',
+                                5, '#10b981',
+                                10, '#f59e0b',
+                                20, '#ef4444',
+                                30, '#8b5cf6',
+                                40, '#ec4899'
+                            ],
+                            'circle-opacity': 0.8,
+                            'circle-blur': 0.5
+                        }
+                    });
+                    
+                    // Add wind direction indicators if data available
+                    if (map.getSource('custom-source')) {
+                        map.addLayer({
+                            'id': 'wind-direction',
+                            'type': 'symbol',
+                            'source': 'custom-source',
+                            'source-layer': sourceLayer,
+                            'layout': {
+                                'icon-image': 'arrow',
+                                'icon-size': 0.5,
+                                'icon-rotate': ['coalesce', ['get', 'direction'], ['get', 'flow_direction'], 0],
+                                'icon-rotation-alignment': 'map',
+                                'icon-allow-overlap': true,
+                                'icon-ignore-placement': true
+                            },
+                            'paint': {
+                                'icon-opacity': 0.6
+                            }
+                        });
+                    }
+                    
+                    currentVisualizationType = 'points';
+                    currentTilesetId = tilesetId;
+                    showNotification('Custom tileset loaded as point visualization', 'info');
+                    
+                    // Update controls visibility
+                    updateControlsForVisualizationType();
+                    
+                } catch (error) {
+                    console.error('Error loading tileset:', error);
+                    
+                    // Try alternative approach - load as raster
+                    try {
+                        if (map.getSource('custom-source')) {
+                            map.removeSource('custom-source');
+                        }
+                        
+                        // Try as raster source
+                        map.addSource('custom-source', {
+                            'type': 'raster',
+                            'url': `mapbox://${tilesetId}`,
+                            'tileSize': 256
+                        });
+                        
+                        map.addLayer({
+                            'id': 'wind-layer',
+                            'type': 'raster',
+                            'source': 'custom-source',
+                            'paint': {
+                                'raster-opacity': 0.8
+                            }
+                        });
+                        
+                        currentVisualizationType = 'raster';
+                        currentTilesetId = tilesetId;
+                        showNotification('Custom tileset loaded as raster', 'info');
+                        
+                    } catch (rasterError) {
+                        console.error('Failed to load as raster:', rasterError);
+                        throw new Error('Unable to load tileset in any format');
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Error loading tileset:', error);
+                showNotification('Failed to load tileset: ' + error.message, 'error');
+                
+                // Revert to previous tileset
+                document.getElementById('tilesetSelector').value = currentTilesetId;
+            }
+        }
+        
+        function updateControlsForVisualizationType() {
+            // Hide/show controls based on visualization type
+            const windControls = document.querySelectorAll('.slider-container');
+            if (currentVisualizationType === 'points' || currentVisualizationType === 'raster') {
+                // Disable particle controls for non-particle visualizations
+                windControls.forEach(control => {
+                    control.style.opacity = '0.5';
+                    control.querySelector('input').disabled = true;
+                });
+                showNotification('Wind animation controls are not available for this visualization type', 'info');
+            } else {
+                windControls.forEach(control => {
+                    control.style.opacity = '1';
+                    control.querySelector('input').disabled = false;
+                });
+            }
+        }
+        
+        function getWindColorExpression() {
+            return [
+                'interpolate',
+                ['linear'],
+                ['raster-particle-speed'],
+                1.5, 'rgba(134,163,171,256)',
+                10, 'rgba(57,163,57,256)',
+                20, 'rgba(194,134,62,256)',
+                30, 'rgba(200,66,13,256)',
+                40, 'rgba(175,80,136,256)',
+                50, 'rgba(241,255,109,256)',
+                70, 'rgba(256,37,256,256)'
+            ];
+        }
+        
         // Control functions
         function updateWindControl(type, value) {
-            if (!map || !map.getLayer('wind-layer')) return;
+            if (!map || !map.getLayer('wind-layer') || currentVisualizationType !== 'particles') return;
             
             switch(type) {
                 case 'speed':
@@ -509,15 +727,21 @@
         }
         
         function toggleWindLayer() {
-            if (!map || !map.getLayer('wind-layer')) return;
+            if (!map) return;
             
-            if (windLayerVisible) {
-                map.setLayoutProperty('wind-layer', 'visibility', 'none');
-                windLayerVisible = false;
-            } else {
-                map.setLayoutProperty('wind-layer', 'visibility', 'visible');
-                windLayerVisible = true;
-            }
+            const layerIds = ['wind-layer', 'wind-points', 'wind-direction'];
+            
+            layerIds.forEach(layerId => {
+                if (map.getLayer(layerId)) {
+                    if (windLayerVisible) {
+                        map.setLayoutProperty(layerId, 'visibility', 'none');
+                    } else {
+                        map.setLayoutProperty(layerId, 'visibility', 'visible');
+                    }
+                }
+            });
+            
+            windLayerVisible = !windLayerVisible;
         }
         
         // File upload handling
@@ -601,10 +825,27 @@
                         
                         // Add to selector
                         const selector = document.getElementById('tilesetSelector');
-                        const option = document.createElement('option');
-                        option.value = status.tileset_id || status.mapbox_tileset;
-                        option.textContent = `Uploaded: ${status.tileset_id}`;
-                        selector.appendChild(option);
+                        const tilesetId = status.mapbox_tileset || `{{ mapbox_username }}.${status.tileset_id}`;
+                        
+                        // Check if option already exists
+                        let optionExists = false;
+                        for (let option of selector.options) {
+                            if (option.value === tilesetId) {
+                                optionExists = true;
+                                break;
+                            }
+                        }
+                        
+                        if (!optionExists) {
+                            const option = document.createElement('option');
+                            option.value = tilesetId;
+                            option.textContent = `Uploaded: ${status.tileset_id}`;
+                            selector.appendChild(option);
+                        }
+                        
+                        // Automatically select and load the new tileset
+                        selector.value = tilesetId;
+                        await loadTileset(tilesetId);
                         
                         setTimeout(() => {
                             document.getElementById('progressContainer').style.display = 'none';
@@ -648,16 +889,30 @@
             }, 3000);
         }
         
-        // Tileset selector
-        document.getElementById('tilesetSelector').addEventListener('change', function(e) {
-            if (e.target.value === 'mapbox.gfs-winds') {
-                // Already loaded
-                return;
-            }
-            
-            console.log('Loading tileset:', e.target.value);
-            showNotification('Custom tileset loading coming soon', 'info');
-        });
+        function showLoading(show) {
+            document.getElementById('loading').classList.toggle('active', show);
+        }
+        
+        // Setup event handlers
+        function setupEventHandlers() {
+            // Tileset selector
+            document.getElementById('tilesetSelector').addEventListener('change', async function(e) {
+                const tilesetId = e.target.value;
+                if (!tilesetId) return;
+                
+                console.log('Loading tileset:', tilesetId);
+                showLoading(true);
+                
+                try {
+                    await loadTileset(tilesetId);
+                } catch (error) {
+                    console.error('Error loading tileset:', error);
+                    showNotification('Failed to load tileset', 'error');
+                } finally {
+                    showLoading(false);
+                }
+            });
+        }
     </script>
 </body>
 </html>
