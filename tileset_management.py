@@ -1,17 +1,19 @@
 """
 Mapbox Tileset Management Module
 Handles creation and management of Mapbox tilesets from NetCDF data
+Supports both vector (reliable) and raster-array (requires pro account) formats
 """
 
 import os
 import json
 import logging
 import tempfile
-import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import requests
 from datetime import datetime
+import xarray as xr
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -23,35 +25,215 @@ class MapboxTilesetManager:
         self.access_token = access_token
         self.username = username
         self.api_base = "https://api.mapbox.com"
-        self.headers = {
-            "Content-Type": "application/json",
-        }
         
+    def create_raster_array_tileset(self, netcdf_path: str, tileset_id: str) -> Dict[str, Any]:
+        """
+        Attempt to create raster-array tileset (requires pro account)
+        Falls back to vector format if raster upload fails
+        """
+        logger.info("Attempting raster-array tileset creation...")
+        
+        try:
+            # Try to convert to GeoTIFF and upload
+            from utils.raster_converter import RasterConverter
+            
+            # Convert NetCDF to GeoTIFF
+            geotiff_path = tempfile.mktemp(suffix='.tif')
+            success = RasterConverter.netcdf_to_geotiff(netcdf_path, geotiff_path)
+            
+            if not success:
+                logger.warning("Failed to convert to GeoTIFF, falling back to vector format")
+                return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
+            
+            # Try to upload as raster
+            result = self._upload_raster_tileset(geotiff_path, tileset_id)
+            
+            # Clean up
+            if os.path.exists(geotiff_path):
+                os.remove(geotiff_path)
+            
+            if result['success']:
+                return result
+            else:
+                logger.warning(f"Raster upload failed: {result['error']}, falling back to vector format")
+                return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
+                
+        except ImportError:
+            logger.warning("Raster converter not available, using vector format")
+            return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
+        except Exception as e:
+            logger.error(f"Error in raster tileset creation: {str(e)}")
+            return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
+    
+    def _upload_raster_tileset(self, geotiff_path: str, tileset_id: str) -> Dict[str, Any]:
+        """Try to upload raster tileset (may fail on free accounts)"""
+        try:
+            # Get upload credentials
+            credentials_url = f"{self.api_base}/uploads/v1/{self.username}?access_token={self.access_token}"
+            
+            response = requests.post(credentials_url, json={})
+            
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"Failed to get upload credentials: {response.status_code}"
+                }
+            
+            credentials = response.json()
+            
+            # Upload to S3
+            with open(geotiff_path, 'rb') as f:
+                files = {'file': (os.path.basename(geotiff_path), f)}
+                upload_response = requests.post(credentials['url'], files=files)
+            
+            if upload_response.status_code not in [200, 201, 204]:
+                return {
+                    "success": False,
+                    "error": "Failed to upload to S3"
+                }
+            
+            # Create tileset
+            tileset_url = f"{self.api_base}/uploads/v1/{self.username}/{tileset_id}?access_token={self.access_token}"
+            
+            tileset_data = {
+                "url": credentials['url'],
+                "tileset": f"{self.username}.{tileset_id}",
+                "name": f"Wind data {tileset_id}"
+            }
+            
+            create_response = requests.post(tileset_url, json=tileset_data)
+            
+            if create_response.status_code in [200, 201, 202]:
+                return {
+                    "success": True,
+                    "tileset_id": f"{self.username}.{tileset_id}",
+                    "format": "raster-array"
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": f"Failed to create tileset: {create_response.text}"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def process_netcdf_to_tileset(self, netcdf_path: str, tileset_id: str, recipe: Dict) -> Dict[str, Any]:
+        """Process NetCDF to vector tileset (reliable method)"""
+        try:
+            # Step 1: Convert NetCDF to line-delimited GeoJSON
+            logger.info("Converting NetCDF to GeoJSON...")
+            geojson_path = self._convert_netcdf_to_geojson(netcdf_path)
+            
+            if not geojson_path:
+                return {"success": False, "error": "Failed to convert NetCDF to GeoJSON"}
+            
+            # Step 2: Create tileset source
+            source_id = f"{tileset_id}_src"
+            source_id = self._sanitize_id(source_id)
+            
+            logger.info(f"Creating tileset source: {source_id}")
+            source_result = self.create_tileset_source(source_id, geojson_path)
+            
+            # Clean up GeoJSON file
+            if os.path.exists(geojson_path):
+                os.remove(geojson_path)
+            
+            if not source_result["success"]:
+                return source_result
+            
+            # Step 3: Create tileset with recipe
+            tileset_id = self._sanitize_id(tileset_id)
+            
+            recipe = {
+                "version": 1,
+                "layers": {
+                    "weather_data": {
+                        "source": f"mapbox://tileset-source/{self.username}/{source_id}",
+                        "minzoom": 0,
+                        "maxzoom": 10,
+                        "features": {
+                            "attributes": {
+                                "zoom": 5,
+                                "allowed_output": [
+                                    "u", "v", "speed", "direction"
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+            
+            logger.info(f"Creating tileset: {tileset_id}")
+            tileset_result = self.create_tileset(tileset_id, recipe)
+            
+            if not tileset_result["success"]:
+                return tileset_result
+            
+            # Step 4: Publish tileset
+            logger.info(f"Publishing tileset: {tileset_id}")
+            publish_result = self.publish_tileset(tileset_id)
+            
+            if not publish_result["success"]:
+                return publish_result
+            
+            return {
+                "success": True,
+                "tileset_id": f"{self.username}.{tileset_id}",
+                "job_id": publish_result.get("job_id"),
+                "format": "vector"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing NetCDF: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return {"success": False, "error": str(e)}
+    
     def create_tileset_source(self, source_id: str, file_path: str) -> Dict[str, Any]:
         """Upload source data to Mapbox"""
         try:
-            # Sanitize source_id to meet Mapbox requirements
-            # Must be 32 chars or less, only a-z, 0-9, -, _
-            source_id = source_id.lower()
-            source_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in source_id)
-            source_id = source_id[:32]  # Truncate to 32 characters
+            url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
             
-            logger.info(f"Sanitized source_id: {source_id}")
-            
-            # First, create the source
-            create_url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
-            
-            # Upload the file with correct content type for line-delimited JSON
+            # Read file content
             with open(file_path, 'rb') as f:
-                files = {'file': (Path(file_path).name, f, 'application/x-ndjson')}
-                response = requests.post(create_url, files=files)
-                
-            if response.status_code == 200:
+                file_content = f.read()
+            
+            logger.info(f"Uploading source file: {file_path} ({len(file_content)} bytes)")
+            
+            # Make request with proper headers
+            headers = {
+                'Content-Type': 'application/x-ndjson',
+                'Cache-Control': 'no-cache'
+            }
+            
+            response = requests.put(
+                url,
+                data=file_content,
+                headers=headers
+            )
+            
+            logger.info(f"Source upload response: {response.status_code}")
+            
+            if response.status_code in [200, 201]:
                 logger.info(f"Successfully created tileset source: {source_id}")
                 return {"success": True, "source_id": f"{self.username}.{source_id}"}
             else:
-                logger.error(f"Failed to create source: {response.status_code} - {response.text}")
-                return {"success": False, "error": response.text}
+                error_msg = f"Failed to create source: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                
+                # Provide helpful error messages
+                if response.status_code == 401:
+                    error_msg = "Authentication failed. Please check your Mapbox token has the required permissions (uploads:write, tilesets:write)"
+                elif response.status_code == 422:
+                    error_msg = "Invalid source data format. Ensure the GeoJSON is properly formatted."
+                elif response.status_code == 413:
+                    error_msg = "File too large. Try reducing the number of points in your data."
+                
+                return {"success": False, "error": error_msg}
                 
         except Exception as e:
             logger.error(f"Error creating tileset source: {str(e)}")
@@ -64,17 +246,28 @@ class MapboxTilesetManager:
             
             data = {
                 "recipe": recipe,
-                "name": name or tileset_id
+                "name": name or f"Weather data {tileset_id}"
             }
             
-            response = requests.post(url, json=data, headers=self.headers)
+            headers = {
+                'Content-Type': 'application/json'
+            }
+            
+            response = requests.put(
+                url,
+                json=data,
+                headers=headers
+            )
+            
+            logger.info(f"Create tileset response: {response.status_code}")
             
             if response.status_code in [200, 201]:
                 logger.info(f"Successfully created tileset: {tileset_id}")
                 return {"success": True, "tileset_id": f"{self.username}.{tileset_id}"}
             else:
-                logger.error(f"Failed to create tileset: {response.status_code} - {response.text}")
-                return {"success": False, "error": response.text}
+                error_msg = f"Failed to create tileset: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                return {"success": False, "error": error_msg}
                 
         except Exception as e:
             logger.error(f"Error creating tileset: {str(e)}")
@@ -85,25 +278,271 @@ class MapboxTilesetManager:
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}/publish?access_token={self.access_token}"
             
-            response = requests.post(url, headers=self.headers)
+            response = requests.post(
+                url,
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            logger.info(f"Publish tileset response: {response.status_code}")
             
             if response.status_code == 200:
+                result = response.json()
                 logger.info(f"Successfully published tileset: {tileset_id}")
-                return {"success": True, "job_id": response.json().get("jobId")}
+                return {"success": True, "job_id": result.get("jobId")}
+            elif response.status_code == 201:
+                # Sometimes returns 201 for successful queue
+                logger.info(f"Tileset publish queued: {tileset_id}")
+                return {"success": True, "job_id": None}
             else:
-                logger.error(f"Failed to publish tileset: {response.status_code} - {response.text}")
-                return {"success": False, "error": response.text}
+                error_msg = f"Failed to publish tileset: {response.status_code} - {response.text}"
+                logger.error(error_msg)
+                return {"success": False, "error": error_msg}
                 
         except Exception as e:
             logger.error(f"Error publishing tileset: {str(e)}")
             return {"success": False, "error": str(e)}
+    
+    def _convert_netcdf_to_geojson(self, netcdf_path: str) -> Optional[str]:
+        """Convert NetCDF to line-delimited GeoJSON for vector tiles"""
+        try:
+            ds = xr.open_dataset(netcdf_path)
+            
+            # Find coordinates
+            lons, lats = self._get_coordinates(ds)
+            
+            # Find wind components
+            u_var, v_var = self._find_wind_components(ds)
+            
+            if not u_var or not v_var:
+                logger.warning("No wind components found, using first two variables")
+                var_list = list(ds.data_vars)
+                if len(var_list) >= 2:
+                    u_var = var_list[0]
+                    v_var = var_list[1]
+                else:
+                    # If only one variable, create a dummy second one
+                    if len(var_list) == 1:
+                        u_var = var_list[0]
+                        v_var = var_list[0]
+                    else:
+                        raise ValueError("Need at least 1 variable for visualization")
+            
+            logger.info(f"Using variables: U={u_var}, V={v_var}")
+            
+            # Get data
+            u_data = ds[u_var]
+            v_data = ds[v_var]
+            
+            # Handle time dimension
+            if 'time' in u_data.dims:
+                u_data = u_data.isel(time=0)
+                v_data = v_data.isel(time=0)
+            
+            # Create temporary file
+            temp_path = tempfile.mktemp(suffix='.ndjson')
+            
+            # Write features
+            feature_count = 0
+            with open(temp_path, 'w') as f:
+                # Sample data to reduce size (max ~10000 points)
+                max_points = 10000
+                total_points = len(lats) * len(lons)
+                
+                if total_points > max_points:
+                    # Calculate step size to get approximately max_points
+                    step = int(np.sqrt(total_points / max_points))
+                    lat_step = max(1, step)
+                    lon_step = max(1, step)
+                else:
+                    lat_step = 1
+                    lon_step = 1
+                
+                logger.info(f"Sampling data: {len(lats)}x{len(lons)} -> "
+                          f"{len(lats)//lat_step}x{len(lons)//lon_step} points")
+                
+                for i in range(0, len(lats), lat_step):
+                    for j in range(0, len(lons), lon_step):
+                        try:
+                            # Get values
+                            if u_var == v_var:
+                                # Single variable case
+                                u_val = float(u_data.values[i, j])
+                                v_val = 0.0
+                            else:
+                                u_val = float(u_data.values[i, j])
+                                v_val = float(v_data.values[i, j])
+                            
+                            # Skip NaN values
+                            if np.isnan(u_val):
+                                u_val = 0.0
+                            if np.isnan(v_val):
+                                v_val = 0.0
+                            
+                            # Calculate derived values
+                            speed = np.sqrt(u_val**2 + v_val**2)
+                            direction = np.arctan2(v_val, u_val) * 180 / np.pi
+                            
+                            # Create feature
+                            feature = {
+                                "type": "Feature",
+                                "geometry": {
+                                    "type": "Point",
+                                    "coordinates": [float(lons[j]), float(lats[i])]
+                                },
+                                "properties": {
+                                    "u": round(u_val, 3),
+                                    "v": round(v_val, 3),
+                                    "speed": round(float(speed), 3),
+                                    "direction": round(float(direction), 1)
+                                }
+                            }
+                            
+                            # Write as line-delimited JSON
+                            f.write(json.dumps(feature) + '\n')
+                            feature_count += 1
+                            
+                        except Exception as e:
+                            # Skip problematic points
+                            continue
+            
+            ds.close()
+            
+            logger.info(f"Created GeoJSON with {feature_count} features at {temp_path}")
+            
+            # Verify file is not empty
+            if feature_count == 0:
+                logger.error("No valid features found in NetCDF")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                return None
+            
+            return temp_path
+            
+        except Exception as e:
+            logger.error(f"Error converting NetCDF to GeoJSON: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    def _find_wind_components(self, ds) -> Tuple[Optional[str], Optional[str]]:
+        """Find U and V wind components in dataset"""
+        u_patterns = ['u', 'u10', 'u_wind', 'u_component', 'eastward', 'ugrd', 'uas', 'u-wind', 'uwind']
+        v_patterns = ['v', 'v10', 'v_wind', 'v_component', 'northward', 'vgrd', 'vas', 'v-wind', 'vwind']
+        
+        u_var = None
+        v_var = None
+        
+        # Check all variables
+        for var in ds.data_vars:
+            var_lower = var.lower()
+            
+            # Look for U component
+            if not u_var:
+                for pattern in u_patterns:
+                    if pattern in var_lower or var_lower == pattern:
+                        u_var = var
+                        logger.info(f"Found U component: {var}")
+                        break
+            
+            # Look for V component
+            if not v_var:
+                for pattern in v_patterns:
+                    if pattern in var_lower or var_lower == pattern:
+                        v_var = var
+                        logger.info(f"Found V component: {var}")
+                        break
+            
+            # Stop if both found
+            if u_var and v_var:
+                break
+        
+        return u_var, v_var
+    
+    def _get_coordinates(self, ds) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract longitude and latitude coordinates"""
+        lon_names = ['lon', 'longitude', 'x', 'X', 'long', 'LON', 'LONGITUDE']
+        lat_names = ['lat', 'latitude', 'y', 'Y', 'LAT', 'LATITUDE']
+        
+        lons = None
+        lats = None
+        
+        # Check coordinates
+        for name in lon_names:
+            if name in ds.coords:
+                lons = ds.coords[name].values
+                logger.info(f"Found longitude in coords: {name}")
+                break
+        
+        for name in lat_names:
+            if name in ds.coords:
+                lats = ds.coords[name].values
+                logger.info(f"Found latitude in coords: {name}")
+                break
+        
+        # Check dimensions if not in coordinates
+        if lons is None:
+            for name in lon_names:
+                if name in ds.dims:
+                    # Create coordinate array from dimension
+                    lons = np.arange(ds.dims[name])
+                    logger.info(f"Created longitude from dimension: {name}")
+                    break
+        
+        if lats is None:
+            for name in lat_names:
+                if name in ds.dims:
+                    # Create coordinate array from dimension
+                    lats = np.arange(ds.dims[name])
+                    logger.info(f"Created latitude from dimension: {name}")
+                    break
+        
+        # Check data variables as last resort
+        if lons is None:
+            for name in lon_names:
+                if name in ds.data_vars:
+                    lons = ds[name].values
+                    logger.info(f"Found longitude in data_vars: {name}")
+                    break
+        
+        if lats is None:
+            for name in lat_names:
+                if name in ds.data_vars:
+                    lats = ds[name].values
+                    logger.info(f"Found latitude in data_vars: {name}")
+                    break
+        
+        if lons is None or lats is None:
+            # Last resort: create synthetic coordinates
+            logger.warning("Could not find coordinates, creating synthetic grid")
+            if lons is None:
+                lons = np.linspace(-180, 180, 100)
+            if lats is None:
+                lats = np.linspace(-90, 90, 50)
+        
+        return lons, lats
+    
+    def _sanitize_id(self, id_str: str) -> str:
+        """Sanitize ID to meet Mapbox requirements (32 chars, alphanumeric + dash/underscore)"""
+        # Convert to lowercase
+        id_str = id_str.lower()
+        # Replace invalid characters with underscore
+        id_str = ''.join(c if c.isalnum() or c in '-_' else '_' for c in id_str)
+        # Remove consecutive underscores
+        while '__' in id_str:
+            id_str = id_str.replace('__', '_')
+        # Trim to 32 characters
+        id_str = id_str[:32]
+        # Remove trailing underscores
+        id_str = id_str.rstrip('_')
+        
+        return id_str
     
     def get_tileset_status(self, tileset_id: str) -> Dict[str, Any]:
         """Get tileset information and status"""
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}?access_token={self.access_token}"
             
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url)
             
             if response.status_code == 200:
                 return response.json()
@@ -120,10 +559,13 @@ class MapboxTilesetManager:
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}?access_token={self.access_token}&limit={limit}"
             
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url)
             
             if response.status_code == 200:
                 return response.json()
+            elif response.status_code == 401:
+                logger.error("Authentication failed when listing tilesets - check your token")
+                return []
             else:
                 logger.error(f"Failed to list tilesets: {response.status_code}")
                 return []
@@ -137,11 +579,14 @@ class MapboxTilesetManager:
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}?access_token={self.access_token}"
             
-            response = requests.delete(url, headers=self.headers)
+            response = requests.delete(url)
             
             if response.status_code == 204:
                 logger.info(f"Successfully deleted tileset: {tileset_id}")
                 return True
+            elif response.status_code == 404:
+                logger.warning(f"Tileset not found: {tileset_id}")
+                return False
             else:
                 logger.error(f"Failed to delete tileset: {response.status_code}")
                 return False
@@ -150,276 +595,17 @@ class MapboxTilesetManager:
             logger.error(f"Error deleting tileset: {str(e)}")
             return False
     
-    def process_netcdf_to_tileset(self, netcdf_path: str, tileset_id: str, recipe: Dict) -> Dict[str, Any]:
-        """Complete process to convert NetCDF to Mapbox tileset"""
-        try:
-            # Step 1: Convert NetCDF to GeoJSON
-            geojson_path = self._convert_netcdf_to_geojson(netcdf_path)
-            
-            if not geojson_path:
-                return {"success": False, "error": "Failed to convert NetCDF to GeoJSON"}
-            
-            # Step 2: Create tileset source with sanitized ID
-            # Source ID must be different from tileset ID and also sanitized
-            source_id = f"{tileset_id}_src"
-            source_id = source_id.lower()
-            source_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in source_id)
-            source_id = source_id[:32]  # Ensure it's no more than 32 chars
-            
-            source_result = self.create_tileset_source(source_id, geojson_path)
-            
-            if not source_result["success"]:
-                return source_result
-            
-            # Step 3: Create a simple recipe that Mapbox will accept
-            # Use a minimal recipe structure
-            simple_recipe = {
-                "version": 1,
-                "layers": {
-                    "weather_data": {
-                        "source": f"mapbox://tileset-source/{self.username}/{source_id}",
-                        "minzoom": 0,
-                        "maxzoom": 5
-                    }
-                }
-            }
-            
-            # Step 4: Create tileset (also ensure tileset_id is sanitized)
-            tileset_id = tileset_id.lower()
-            tileset_id = ''.join(c if c.isalnum() or c in '-_' else '_' for c in tileset_id)
-            tileset_id = tileset_id[:32]
-            
-            tileset_result = self.create_tileset(tileset_id, simple_recipe)
-            
-            if not tileset_result["success"]:
-                return tileset_result
-            
-            # Step 5: Publish tileset
-            publish_result = self.publish_tileset(tileset_id)
-            
-            if not publish_result["success"]:
-                return publish_result
-            
-            # Clean up temporary file
-            if os.path.exists(geojson_path):
-                os.remove(geojson_path)
-            
-            return {
-                "success": True,
-                "tileset_id": f"{self.username}.{tileset_id}",
-                "job_id": publish_result.get("job_id")
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing NetCDF to tileset: {str(e)}")
-            return {"success": False, "error": str(e)}
-    
-    def _convert_netcdf_to_geojson(self, netcdf_path: str) -> Optional[str]:
-        """Convert NetCDF to GeoJSON format (line-delimited for Mapbox)"""
-        try:
-            import xarray as xr
-            import numpy as np
-            
-            # Open NetCDF file
-            ds = xr.open_dataset(netcdf_path)
-            
-            # Extract coordinates
-            if 'lon' in ds.coords:
-                lons = ds.coords['lon'].values
-            elif 'longitude' in ds.coords:
-                lons = ds.coords['longitude'].values
-            else:
-                raise ValueError("No longitude coordinate found")
-            
-            if 'lat' in ds.coords:
-                lats = ds.coords['lat'].values
-            elif 'latitude' in ds.coords:
-                lats = ds.coords['latitude'].values
-            else:
-                raise ValueError("No latitude coordinate found")
-            
-            # Find wind components
-            u_var = None
-            v_var = None
-            
-            for var in ds.data_vars:
-                var_lower = var.lower()
-                if any(pattern in var_lower for pattern in ['u', 'u10', 'u_wind', 'eastward']):
-                    u_var = var
-                elif any(pattern in var_lower for pattern in ['v', 'v10', 'v_wind', 'northward']):
-                    v_var = var
-            
-            if not u_var or not v_var:
-                logger.warning("No wind components found, using first two variables")
-                var_list = list(ds.data_vars)
-                if len(var_list) >= 2:
-                    u_var = var_list[0]
-                    v_var = var_list[1]
-                else:
-                    raise ValueError("Need at least 2 variables for wind visualization")
-            
-            logger.info(f"Using variables: U={u_var}, V={v_var}")
-            
-            # Create a temporary file for line-delimited GeoJSON
-            temp_path = tempfile.mktemp(suffix='.geojson')
-            
-            with open(temp_path, 'w') as f:
-                # Sample the data to avoid too many points
-                lat_step = max(1, len(lats) // 100)
-                lon_step = max(1, len(lons) // 100)
-                
-                # Get wind data
-                u_data = ds[u_var]
-                v_data = ds[v_var]
-                
-                # Handle time dimension if present
-                if 'time' in u_data.dims:
-                    u_data = u_data.isel(time=0)
-                    v_data = v_data.isel(time=0)
-                
-                # Write features as line-delimited JSON (NOT FeatureCollection)
-                feature_count = 0
-                for i in range(0, len(lats), lat_step):
-                    for j in range(0, len(lons), lon_step):
-                        try:
-                            u_val = float(u_data.values[i, j])
-                            v_val = float(v_data.values[i, j])
-                            
-                            if not np.isnan(u_val) and not np.isnan(v_val):
-                                # Calculate wind speed and direction
-                                speed = np.sqrt(u_val**2 + v_val**2)
-                                direction = np.arctan2(v_val, u_val) * 180 / np.pi
-                                
-                                feature = {
-                                    "type": "Feature",
-                                    "geometry": {
-                                        "type": "Point",
-                                        "coordinates": [float(lons[j]), float(lats[i])]
-                                    },
-                                    "properties": {
-                                        "u": u_val,
-                                        "v": v_val,
-                                        "speed": float(speed),
-                                        "direction": float(direction),
-                                        "lat": float(lats[i]),
-                                        "lon": float(lons[j])
-                                    }
-                                }
-                                # Write each feature on its own line
-                                f.write(json.dumps(feature) + '\n')
-                                feature_count += 1
-                        except Exception as e:
-                            logger.warning(f"Skipping point ({i},{j}): {e}")
-                            continue
-            
-            ds.close()
-            logger.info(f"Created line-delimited GeoJSON with {feature_count} features: {temp_path}")
-            return temp_path
-            
-        except Exception as e:
-            logger.error(f"Error converting NetCDF to GeoJSON: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def _convert_netcdf_to_geotiff(self, netcdf_path: str) -> Optional[str]:
-        """Convert NetCDF to GeoTIFF format for raster-array tilesets"""
-        try:
-            import xarray as xr
-            import rasterio
-            from rasterio.transform import from_bounds
-            import numpy as np
-            
-            # Open NetCDF file
-            ds = xr.open_dataset(netcdf_path)
-            
-            # Find wind components
-            u_var = None
-            v_var = None
-            
-            for var in ds.data_vars:
-                var_lower = var.lower()
-                if any(pattern in var_lower for pattern in ['u', 'u10', 'u_wind', 'eastward']):
-                    u_var = var
-                elif any(pattern in var_lower for pattern in ['v', 'v10', 'v_wind', 'northward']):
-                    v_var = var
-            
-            if not u_var or not v_var:
-                logger.error("No wind components found in NetCDF")
-                return None
-            
-            # Get data
-            u_data = ds[u_var]
-            v_data = ds[v_var]
-            
-            # Handle time dimension
-            if 'time' in u_data.dims:
-                u_data = u_data.isel(time=0)
-                v_data = v_data.isel(time=0)
-            
-            # Get coordinates
-            if 'lon' in ds.coords:
-                lons = ds.coords['lon'].values
-            elif 'longitude' in ds.coords:
-                lons = ds.coords['longitude'].values
-            else:
-                raise ValueError("No longitude coordinate found")
-            
-            if 'lat' in ds.coords:
-                lats = ds.coords['lat'].values
-            elif 'latitude' in ds.coords:
-                lats = ds.coords['latitude'].values
-            else:
-                raise ValueError("No latitude coordinate found")
-            
-            # Create transform
-            transform = from_bounds(
-                lons.min(), lats.min(), lons.max(), lats.max(),
-                len(lons), len(lats)
-            )
-            
-            # Create temporary GeoTIFF with both bands
-            temp_path = tempfile.mktemp(suffix='.tif')
-            
-            with rasterio.open(
-                temp_path,
-                'w',
-                driver='GTiff',
-                height=len(lats),
-                width=len(lons),
-                count=2,  # Two bands for U and V
-                dtype='float32',
-                crs='EPSG:4326',
-                transform=transform
-            ) as dst:
-                dst.write(u_data.values.astype('float32'), 1)
-                dst.write(v_data.values.astype('float32'), 2)
-                
-                # Set band descriptions
-                dst.set_band_description(1, 'u_component')
-                dst.set_band_description(2, 'v_component')
-            
-            ds.close()
-            logger.info(f"Created GeoTIFF: {temp_path}")
-            return temp_path
-            
-        except Exception as e:
-            logger.error(f"Error converting NetCDF to GeoTIFF: {str(e)}")
-            return None
-    
-    def check_job_status(self, tileset_id: str, job_id: str) -> Dict[str, Any]:
+    def get_tileset_job_status(self, tileset_id: str, job_id: str) -> Dict[str, Any]:
         """Check the status of a tileset processing job"""
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}/jobs/{job_id}?access_token={self.access_token}"
             
-            response = requests.get(url, headers=self.headers)
+            response = requests.get(url)
             
             if response.status_code == 200:
                 return response.json()
             else:
-                logger.error(f"Failed to check job status: {response.status_code}")
-                return {"error": response.text}
+                return {"error": f"Failed to get job status: {response.status_code}"}
                 
         except Exception as e:
-            logger.error(f"Error checking job status: {str(e)}")
             return {"error": str(e)}
