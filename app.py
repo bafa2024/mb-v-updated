@@ -259,10 +259,23 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         
         # Find wind components
         wind_components = find_wind_components(ds)
+        
+        # Get all scalar variables
+        scalar_vars = []
+        vector_pairs = []
+        
         if wind_components:
             logger.info(f"Found wind components: {wind_components}")
+            vector_pairs.append({
+                "name": "wind",
+                "u": wind_components["u"],
+                "v": wind_components["v"]
+            })
+            # Remove wind components from scalar vars
+            scalar_vars = [v for v in ds.data_vars if v not in [wind_components["u"], wind_components["v"]]]
         else:
             logger.warning("No wind components found in NetCDF file")
+            scalar_vars = list(ds.data_vars)
         
         # Get bounds
         bounds = get_dataset_bounds(ds)
@@ -270,6 +283,27 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             logger.info(f"Dataset bounds: {bounds}")
         else:
             logger.warning("Could not determine dataset bounds")
+        
+        # Get data previews
+        previews = {}
+        for var_name in list(ds.data_vars)[:5]:  # Preview first 5 variables
+            try:
+                var_data = ds[var_name]
+                if 'time' in var_data.dims:
+                    var_data = var_data.isel(time=0)
+                
+                values = var_data.values.flatten()
+                values = values[~np.isnan(values)]  # Remove NaN values
+                
+                if len(values) > 0:
+                    previews[var_name] = {
+                        "min": float(np.min(values)),
+                        "max": float(np.max(values)),
+                        "mean": float(np.mean(values)),
+                        "units": var_data.attrs.get("units", "unknown")
+                    }
+            except:
+                pass
         
         # Generate tileset ID
         if not tileset_name:
@@ -308,7 +342,9 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "bounds": bounds,
             "visualization_type": visualization_type,
             "created_at": datetime.now().isoformat(),
-            "status": "processing"
+            "status": "processing",
+            "scalar_vars": scalar_vars,
+            "vector_pairs": vector_pairs
         }
         
         ds.close()
@@ -320,7 +356,10 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "metadata": metadata,
             "wind_components": wind_components,
             "bounds": bounds,
-            "visualization_type": visualization_type
+            "visualization_type": visualization_type,
+            "scalar_vars": scalar_vars,
+            "vector_pairs": vector_pairs,
+            "previews": previews
         }
         
     except Exception as e:
@@ -439,6 +478,11 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     "job_id": result.get('job_id')
                 }
                 
+                # Include metadata from active_visualizations
+                if job_id in active_visualizations:
+                    recipe_data["scalar_vars"] = active_visualizations[job_id].get("scalar_vars", [])
+                    recipe_data["vector_pairs"] = active_visualizations[job_id].get("vector_pairs", [])
+                
                 with open(recipe_path, 'w') as f:
                     json.dump(recipe_data, f, indent=2)
                 
@@ -500,7 +544,9 @@ async def get_visualization_status(job_id: str):
         "metadata": viz_info.get('metadata'),
         "format": viz_info.get('format', 'vector'),
         "wind_components": viz_info.get('wind_components'),
-        "upload_id": viz_info.get('upload_id')
+        "upload_id": viz_info.get('upload_id'),
+        "scalar_vars": viz_info.get('scalar_vars', []),
+        "vector_pairs": viz_info.get('vector_pairs', [])
     })
 
 @app.get("/api/upload-status/{upload_id}")
@@ -545,6 +591,8 @@ async def load_tileset(tileset_id: str = Form(...)):
         format_type = 'vector'  # Default
         source_layer = 'weather_data'
         layer_config = {}
+        scalar_vars = []
+        vector_pairs = []
         
         if recipe_files:
             try:
@@ -552,6 +600,8 @@ async def load_tileset(tileset_id: str = Form(...)):
                     recipe_data = json.load(f)
                     format_type = recipe_data.get('format', 'vector')
                     source_layer = recipe_data.get('source_layer', 'weather_data')
+                    scalar_vars = recipe_data.get('scalar_vars', [])
+                    vector_pairs = recipe_data.get('vector_pairs', [])
                     
                     # For raster-array, provide particle configuration
                     if format_type == 'raster-array':
@@ -590,6 +640,8 @@ async def load_tileset(tileset_id: str = Form(...)):
             "config": {
                 "source_layer": source_layer,
                 "visualization_type": format_type,
+                "scalar_vars": scalar_vars,
+                "vector_pairs": vector_pairs,
                 **layer_config
             }
         })
@@ -613,7 +665,9 @@ async def get_active_visualizations():
                 "status": viz.get('status', 'processing'),
                 "created_at": viz.get('created_at'),
                 "format": viz.get('format', 'vector'),
-                "wind_components": viz.get('wind_components')
+                "wind_components": viz.get('wind_components'),
+                "scalar_vars": viz.get('scalar_vars', []),
+                "vector_pairs": viz.get('vector_pairs', [])
             }
             for job_id, viz in active_visualizations.items()
         ]
