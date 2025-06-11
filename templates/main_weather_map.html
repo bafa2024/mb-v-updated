@@ -6,6 +6,7 @@
     <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
     <link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet">
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
     <style>
         body { margin: 0; padding: 0; }
         #map { position: absolute; top: 0; bottom: 0; width: 100%; }
@@ -81,6 +82,11 @@
             margin: 15px 0;
         }
         
+        .slider-container.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+        
         .slider-label {
             display: flex;
             justify-content: space-between;
@@ -140,15 +146,11 @@
             width: 200px;
             height: 20px;
             background: linear-gradient(to right, 
-                #86a3ab 0%, 
-                #6e8fd0 20%, 
-                #0f93a7 30%, 
-                #39a339 45%, 
-                #c2863e 60%, 
-                #c8420d 75%, 
-                #af5088 85%, 
-                #c2fb77 95%, 
-                #ffffff 100%
+                #3b82f6 0%,
+                #10b981 25%,
+                #f59e0b 50%,
+                #ef4444 75%,
+                #8b5cf6 100%
             );
             margin-bottom: 5px;
             border-radius: 3px;
@@ -259,6 +261,11 @@
             margin-bottom: 15px;
             font-size: 13px;
         }
+        
+        /* Wind animation styles */
+        .wind-arrow {
+            transition: transform 0.5s ease;
+        }
     </style>
 </head>
 <body>
@@ -298,14 +305,14 @@
         <!-- Visualization Info -->
         <div id="visualizationInfo" class="visualization-info" style="display: none;">
             <strong>Visualization Type:</strong> <span id="vizType">-</span><br>
-            <strong>Data Points:</strong> <span id="dataPoints">-</span>
+            <strong>Data Points:</strong> <span id="dataPoints">0</span>
         </div>
         
         <!-- Wind Controls -->
         <div class="control-section">
             <h4 style="margin: 0 0 10px 0; font-size: 16px;">Wind Animation Controls</h4>
             
-            <div class="slider-container">
+            <div class="slider-container" id="speedControl">
                 <div class="slider-label">
                     <span>Speed Factor</span>
                     <span id="speedValue">0.4</span>
@@ -315,7 +322,7 @@
                        oninput="updateWindControl('speed', this.value)">
             </div>
             
-            <div class="slider-container">
+            <div class="slider-container" id="particleControl">
                 <div class="slider-label">
                     <span>Particle Count</span>
                     <span id="particleValue">4000</span>
@@ -325,7 +332,7 @@
                        oninput="updateWindControl('particles', this.value)">
             </div>
             
-            <div class="slider-container">
+            <div class="slider-container" id="fadeControl">
                 <div class="slider-label">
                     <span>Fade Opacity</span>
                     <span id="fadeValue">0.9</span>
@@ -335,7 +342,7 @@
                        oninput="updateWindControl('fade', this.value)">
             </div>
             
-            <div class="slider-container">
+            <div class="slider-container" id="resetControl">
                 <div class="slider-label">
                     <span>Reset Rate</span>
                     <span id="resetValue">0.4</span>
@@ -350,6 +357,7 @@
         <div class="control-section">
             <button class="btn btn-secondary" onclick="resetView()">🔄 Reset View</button>
             <button class="btn btn-secondary" onclick="toggleWindLayer()">🌬️ Toggle Wind</button>
+            <button class="btn btn-secondary" onclick="debugTileset()" style="display: none;" id="debugBtn">🔍 Debug Data</button>
         </div>
     </div>
     
@@ -359,10 +367,10 @@
         <div class="legend-gradient"></div>
         <div class="legend-labels">
             <span>0</span>
+            <span>10</span>
             <span>20</span>
-            <span>40</span>
-            <span>60</span>
-            <span>70+</span>
+            <span>30</span>
+            <span>40+</span>
         </div>
     </div>
     
@@ -376,48 +384,45 @@
         let map = null;
         let windLayerVisible = true;
         let currentTilesetId = '{{ default_tileset.id }}';
+        let currentVisualizationType = 'particles';
+        let windAnimationInterval = null;
+        let windArrows = [];
         
-        // Initialize map when page loads
+        // Initialize map
         mapboxgl.accessToken = '{{ mapbox_token }}';
         
         if (!mapboxgl.accessToken || mapboxgl.accessToken === '' || mapboxgl.accessToken === 'None') {
             console.error('Mapbox token not configured');
             alert('Mapbox token not configured. Please check your .env file.');
         } else {
-            // Create map
             map = new mapboxgl.Map({
                 container: 'map',
                 style: 'mapbox://styles/mapbox/dark-v11',
                 center: [-28, 47],
                 zoom: 2,
-                maxZoom: 8,
+                maxZoom: 10,
                 minZoom: 1
             });
             
-            // Add navigation controls
             map.addControl(new mapboxgl.NavigationControl(), 'top-left');
             
-            // Wait for map to load
             map.on('load', function() {
                 console.log('Map loaded successfully');
                 addDefaultWindLayer();
-            });
-            
-            map.on('error', function(e) {
-                console.error('Map error:', e);
+                
+                // Setup source data listener
+                map.on('sourcedata', handleSourceData);
             });
         }
         
         function addDefaultWindLayer() {
             try {
-                // Add wind source
                 map.addSource('raster-array-source', {
                     'type': 'raster-array',
                     'url': 'mapbox://mapbox.gfs-winds',
                     'tileSize': 512
                 });
                 
-                // Add wind layer
                 map.addLayer({
                     'id': 'wind-layer',
                     'type': 'raster-particle',
@@ -429,50 +434,35 @@
                         'raster-particle-reset-rate-factor': 0.4,
                         'raster-particle-count': 4000,
                         'raster-particle-max-speed': 40,
-                        'raster-particle-color': [
-                            'interpolate',
-                            ['linear'],
-                            ['raster-particle-speed'],
-                            1.5, 'rgba(134,163,171,256)',
-                            2.5, 'rgba(126,152,188,256)',
-                            4.12, 'rgba(110,143,208,256)',
-                            4.63, 'rgba(110,143,208,256)',
-                            6.17, 'rgba(15,147,167,256)',
-                            7.72, 'rgba(15,147,167,256)',
-                            9.26, 'rgba(57,163,57,256)',
-                            10.29, 'rgba(57,163,57,256)',
-                            11.83, 'rgba(194,134,62,256)',
-                            13.37, 'rgba(194,134,63,256)',
-                            14.92, 'rgba(200,66,13,256)',
-                            16.46, 'rgba(200,66,13,256)',
-                            18.0, 'rgba(210,0,50,256)',
-                            20.06, 'rgba(215,0,50,256)',
-                            21.6, 'rgba(175,80,136,256)',
-                            23.66, 'rgba(175,80,136,256)',
-                            25.21, 'rgba(117,74,147,256)',
-                            27.78, 'rgba(117,74,147,256)',
-                            29.32, 'rgba(68,105,141,256)',
-                            31.89, 'rgba(68,105,141,256)',
-                            33.44, 'rgba(194,251,119,256)',
-                            42.18, 'rgba(194,251,119,256)',
-                            43.72, 'rgba(241,255,109,256)',
-                            48.87, 'rgba(241,255,109,256)',
-                            50.41, 'rgba(256,256,256,256)',
-                            57.61, 'rgba(256,256,256,256)',
-                            59.16, 'rgba(0,256,256,256)',
-                            68.93, 'rgba(0,256,256,256)',
-                            69.44, 'rgba(256,37,256,256)'
-                        ]
+                        'raster-particle-color': getWindColorScale()
                     }
                 });
                 
-                console.log('Wind layer added successfully');
+                currentVisualizationType = 'particles';
+                enableWindControls(true);
                 showNotification('Wind visualization loaded', 'success');
                 
             } catch (error) {
                 console.error('Failed to add wind layer:', error);
                 showNotification('Failed to load wind data', 'error');
             }
+        }
+        
+        function getWindColorScale() {
+            return [
+                'interpolate',
+                ['linear'],
+                ['raster-particle-speed'],
+                0, 'rgba(59,130,246,256)',
+                5, 'rgba(16,185,129,256)',
+                10, 'rgba(52,211,153,256)',
+                15, 'rgba(251,191,36,256)',
+                20, 'rgba(245,158,11,256)',
+                25, 'rgba(239,68,68,256)',
+                30, 'rgba(220,38,38,256)',
+                35, 'rgba(185,28,28,256)',
+                40, 'rgba(153,27,27,256)'
+            ];
         }
         
         // Tileset selector
@@ -484,27 +474,14 @@
             showLoading(true);
             
             try {
-                // Remove existing layers
-                if (map.getLayer('wind-layer')) {
-                    map.removeLayer('wind-layer');
-                }
-                if (map.getLayer('wind-points')) {
-                    map.removeLayer('wind-points');
-                }
-                if (map.getSource('raster-array-source')) {
-                    map.removeSource('raster-array-source');
-                }
-                if (map.getSource('custom-source')) {
-                    map.removeSource('custom-source');
-                }
+                clearWindVisualization();
                 
-                // Check if it's the default tileset
                 if (tilesetId === 'mapbox.gfs-winds') {
                     addDefaultWindLayer();
                     currentTilesetId = tilesetId;
                     document.getElementById('visualizationInfo').style.display = 'none';
+                    document.getElementById('debugBtn').style.display = 'none';
                 } else {
-                    // Load custom tileset
                     await loadCustomTileset(tilesetId);
                 }
                 
@@ -518,7 +495,6 @@
         });
         
         async function loadCustomTileset(tilesetId) {
-            // Get tileset info from backend
             const formData = new FormData();
             formData.append('tileset_id', tilesetId);
             
@@ -541,10 +517,31 @@
             // Add vector source
             map.addSource('custom-source', {
                 'type': 'vector',
-                'url': `mapbox://${tilesetId}`
+                'url': `mapbox://${tilesetId}`,
+                'promoteId': {'weather_data': 'id'}
             });
             
             const sourceLayer = tilesetInfo.source_layer || 'weather_data';
+            
+            // First, add a heatmap layer for better visualization
+            map.addLayer({
+                'id': 'wind-heatmap',
+                'type': 'heatmap',
+                'source': 'custom-source',
+                'source-layer': sourceLayer,
+                'paint': {
+                    'heatmap-weight': [
+                        'interpolate',
+                        ['linear'],
+                        ['get', 'speed'],
+                        0, 0,
+                        40, 1
+                    ],
+                    'heatmap-intensity': 0.5,
+                    'heatmap-radius': 30,
+                    'heatmap-opacity': 0.6
+                }
+            });
             
             // Add point layer
             map.addLayer({
@@ -558,49 +555,206 @@
                         ['linear'],
                         ['zoom'],
                         2, 4,
-                        8, 8
+                        6, 8,
+                        10, 12
                     ],
                     'circle-color': [
                         'interpolate',
                         ['linear'],
                         ['get', 'speed'],
                         0, '#3b82f6',
-                        10, '#10b981',
+                        5, '#10b981',
+                        10, '#34d399',
+                        15, '#fbbf24',
                         20, '#f59e0b',
-                        30, '#ef4444',
-                        40, '#8b5cf6'
+                        25, '#ef4444',
+                        30, '#dc2626',
+                        35, '#b91c1c',
+                        40, '#991b1b'
                     ],
-                    'circle-opacity': 0.8
+                    'circle-opacity': 0.8,
+                    'circle-stroke-color': 'white',
+                    'circle-stroke-width': 1
                 }
             });
             
             // Add click handler
             map.on('click', 'wind-points', (e) => {
                 const props = e.features[0].properties;
+                const coords = e.features[0].geometry.coordinates;
+                
                 new mapboxgl.Popup()
-                    .setLngLat(e.lngLat)
+                    .setLngLat(coords)
                     .setHTML(`
-                        <strong>Wind Data</strong><br>
-                        Speed: ${props.speed || 'N/A'} m/s<br>
-                        Direction: ${props.direction || 'N/A'}°
+                        <div style="font-family: Arial; font-size: 14px;">
+                            <strong>Wind Data</strong><br>
+                            Location: ${coords[1].toFixed(3)}°, ${coords[0].toFixed(3)}°<br>
+                            Speed: ${props.speed ? parseFloat(props.speed).toFixed(1) : 'N/A'} m/s<br>
+                            Direction: ${props.direction ? parseFloat(props.direction).toFixed(0) : 'N/A'}°<br>
+                            U: ${props.u ? parseFloat(props.u).toFixed(2) : 'N/A'} m/s<br>
+                            V: ${props.v ? parseFloat(props.v).toFixed(2) : 'N/A'} m/s
+                        </div>
                     `)
                     .addTo(map);
             });
             
+            map.on('mouseenter', 'wind-points', () => {
+                map.getCanvas().style.cursor = 'pointer';
+            });
+            
+            map.on('mouseleave', 'wind-points', () => {
+                map.getCanvas().style.cursor = '';
+            });
+            
             currentTilesetId = tilesetId;
+            currentVisualizationType = 'points';
             
             // Update UI
             document.getElementById('visualizationInfo').style.display = 'block';
-            document.getElementById('vizType').textContent = 'Point Visualization';
-            document.getElementById('dataPoints').textContent = 'Loading...';
+            document.getElementById('vizType').textContent = 'Point & Heatmap Visualization';
+            document.getElementById('debugBtn').style.display = 'block';
             
-            // Disable wind controls
-            document.querySelectorAll('.slider-container input').forEach(input => {
-                input.disabled = true;
-                input.parentElement.style.opacity = '0.5';
+            enableWindControls(false);
+            showNotification('Custom tileset loaded as point visualization', 'info');
+            
+            // Try to fit bounds after a delay
+            setTimeout(() => {
+                tryFitBounds(sourceLayer);
+            }, 2000);
+        }
+        
+        function handleSourceData(e) {
+            if (e.sourceId === 'custom-source' && e.isSourceLoaded) {
+                updateDataCount();
+            }
+        }
+        
+        function updateDataCount() {
+            if (!map.getSource('custom-source')) return;
+            
+            try {
+                const features = map.querySourceFeatures('custom-source', {
+                    sourceLayer: 'weather_data'
+                });
+                
+                // Count unique features
+                const uniqueCoords = new Set();
+                features.forEach(f => {
+                    if (f.geometry && f.geometry.coordinates) {
+                        uniqueCoords.add(f.geometry.coordinates.join(','));
+                    }
+                });
+                
+                document.getElementById('dataPoints').textContent = uniqueCoords.size;
+                
+                if (uniqueCoords.size > 0) {
+                    document.getElementById('visualizationInfo').style.display = 'block';
+                }
+            } catch (error) {
+                console.error('Error counting features:', error);
+                document.getElementById('dataPoints').textContent = '0';
+            }
+        }
+        
+        function tryFitBounds(sourceLayer) {
+            try {
+                const features = map.querySourceFeatures('custom-source', {
+                    sourceLayer: sourceLayer
+                });
+                
+                if (features.length > 0) {
+                    const bounds = new mapboxgl.LngLatBounds();
+                    
+                    features.forEach(feature => {
+                        if (feature.geometry && feature.geometry.coordinates) {
+                            bounds.extend(feature.geometry.coordinates);
+                        }
+                    });
+                    
+                    if (!bounds.isEmpty()) {
+                        map.fitBounds(bounds, {
+                            padding: 50,
+                            duration: 1000
+                        });
+                        
+                        updateDataCount();
+                    }
+                }
+            } catch (error) {
+                console.error('Error fitting bounds:', error);
+            }
+        }
+        
+        function clearWindVisualization() {
+            // Clear any animations
+            if (windAnimationInterval) {
+                clearInterval(windAnimationInterval);
+                windAnimationInterval = null;
+            }
+            
+            // Remove wind arrows
+            windArrows.forEach(arrow => arrow.remove());
+            windArrows = [];
+            
+            // Remove layers
+            const layers = ['wind-layer', 'wind-points', 'wind-heatmap'];
+            layers.forEach(id => {
+                if (map.getLayer(id)) {
+                    map.removeLayer(id);
+                }
             });
             
-            showNotification('Custom tileset loaded as point visualization', 'info');
+            // Remove sources
+            const sources = ['raster-array-source', 'custom-source'];
+            sources.forEach(id => {
+                if (map.getSource(id)) {
+                    map.removeSource(id);
+                }
+            });
+        }
+        
+        function enableWindControls(enable) {
+            const controls = ['speedControl', 'particleControl', 'fadeControl', 'resetControl'];
+            controls.forEach(id => {
+                const element = document.getElementById(id);
+                if (enable) {
+                    element.classList.remove('disabled');
+                } else {
+                    element.classList.add('disabled');
+                }
+            });
+            
+            if (!enable) {
+                showNotification('Wind animation controls are not available for this visualization type', 'info');
+            }
+        }
+        
+        function debugTileset() {
+            if (!map.getSource('custom-source')) {
+                console.log('No custom source loaded');
+                return;
+            }
+            
+            const features = map.querySourceFeatures('custom-source', {
+                sourceLayer: 'weather_data'
+            });
+            
+            console.log('Debug Information:');
+            console.log('Total features:', features.length);
+            
+            if (features.length > 0) {
+                console.log('Sample feature:', features[0]);
+                console.log('Properties:', features[0].properties);
+                console.log('Geometry:', features[0].geometry);
+            }
+            
+            // Try different layer names
+            ['weather_data', 'data', 'flow_layer', 'wind_layer'].forEach(layer => {
+                const layerFeatures = map.querySourceFeatures('custom-source', {
+                    sourceLayer: layer
+                });
+                console.log(`Layer "${layer}":`, layerFeatures.length, 'features');
+            });
         }
         
         // Control functions
@@ -628,24 +782,24 @@
         }
         
         function resetView() {
-            if (map) {
+            if (currentVisualizationType === 'particles') {
                 map.flyTo({
                     center: [-28, 47],
                     zoom: 2,
                     duration: 1500
                 });
+            } else {
+                tryFitBounds('weather_data');
             }
         }
         
         function toggleWindLayer() {
-            if (!map) return;
-            
-            const layers = ['wind-layer', 'wind-points'];
-            layers.forEach(layerId => {
-                if (map.getLayer(layerId)) {
-                    const visibility = map.getLayoutProperty(layerId, 'visibility');
+            const layers = ['wind-layer', 'wind-points', 'wind-heatmap'];
+            layers.forEach(id => {
+                if (map.getLayer(id)) {
+                    const visibility = map.getLayoutProperty(id, 'visibility');
                     map.setLayoutProperty(
-                        layerId,
+                        id,
                         'visibility',
                         visibility === 'visible' ? 'none' : 'visible'
                     );
@@ -653,7 +807,7 @@
             });
         }
         
-        // File upload handling
+        // File upload
         async function handleFileUpload(input) {
             const file = input.files[0];
             if (!file) return;
@@ -722,7 +876,6 @@
                         updateProgress(100, 'Processing complete!');
                         showNotification('NetCDF file processed successfully!', 'success');
                         
-                        // Add to selector
                         const selector = document.getElementById('tilesetSelector');
                         const tilesetId = status.mapbox_tileset || `{{ mapbox_username }}.${status.tileset_id}`;
                         
@@ -731,7 +884,6 @@
                         option.textContent = `Uploaded: ${status.tileset_id}`;
                         selector.appendChild(option);
                         
-                        // Select the new tileset
                         selector.value = tilesetId;
                         selector.dispatchEvent(new Event('change'));
                         
