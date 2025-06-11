@@ -1,7 +1,7 @@
 """
-Mapbox Tileset Management Module
+Mapbox Tileset Management Module - Fixed Version
 Handles creation and management of Mapbox tilesets from NetCDF data
-Supports both vector (reliable) and raster-array (requires pro account) formats
+Fixed: Proper file upload handling for tileset sources
 """
 
 import os
@@ -14,6 +14,7 @@ import requests
 from datetime import datetime
 import xarray as xr
 import numpy as np
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,16 @@ class MapboxTilesetManager:
             if not geojson_path:
                 return {"success": False, "error": "Failed to convert NetCDF to GeoJSON"}
             
+            # Verify the file exists and has content
+            if not os.path.exists(geojson_path):
+                return {"success": False, "error": "GeoJSON file was not created"}
+                
+            file_size = os.path.getsize(geojson_path)
+            logger.info(f"GeoJSON file created: {geojson_path} ({file_size} bytes)")
+            
+            if file_size == 0:
+                return {"success": False, "error": "GeoJSON file is empty"}
+            
             # Step 2: Create tileset source
             source_id = f"{tileset_id}_src"
             source_id = self._sanitize_id(source_id)
@@ -157,10 +168,7 @@ class MapboxTilesetManager:
                         "maxzoom": 10,
                         "features": {
                             "attributes": {
-                                "zoom": 5,
-                                "allowed_output": [
-                                    "u", "v", "speed", "direction"
-                                ]
+                                "allowed_output": ["speed", "direction", "u", "v"]
                             }
                         }
                     }
@@ -194,27 +202,32 @@ class MapboxTilesetManager:
             return {"success": False, "error": str(e)}
     
     def create_tileset_source(self, source_id: str, file_path: str) -> Dict[str, Any]:
-        """Upload source data to Mapbox"""
+        """Upload source data to Mapbox - FIXED VERSION"""
         try:
             url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
             
-            # Read file content
-            with open(file_path, 'rb') as f:
-                file_content = f.read()
+            # Read file content as line-delimited JSON
+            features = []
+            with open(file_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        features.append(line)
             
-            logger.info(f"Uploading source file: {file_path} ({len(file_content)} bytes)")
+            if not features:
+                return {"success": False, "error": "No features found in GeoJSON file"}
+                
+            # Join features with newlines for NDJSON format
+            ndjson_content = '\n'.join(features)
             
-            # Make request with proper headers
-            headers = {
-                'Content-Type': 'application/x-ndjson',
-                'Cache-Control': 'no-cache'
+            logger.info(f"Uploading source with {len(features)} features...")
+            
+            # Make request with proper content type and multipart form data
+            files = {
+                'file': (f'{source_id}.ndjson', ndjson_content.encode('utf-8'), 'application/x-ndjson')
             }
             
-            response = requests.put(
-                url,
-                data=file_content,
-                headers=headers
-            )
+            response = requests.put(url, files=files)
             
             logger.info(f"Source upload response: {response.status_code}")
             
@@ -226,7 +239,9 @@ class MapboxTilesetManager:
                 logger.error(error_msg)
                 
                 # Provide helpful error messages
-                if response.status_code == 401:
+                if response.status_code == 400 and "No file data" in response.text:
+                    error_msg = "Failed to upload source data. The file format may be incorrect."
+                elif response.status_code == 401:
                     error_msg = "Authentication failed. Please check your Mapbox token has the required permissions (uploads:write, tilesets:write)"
                 elif response.status_code == 422:
                     error_msg = "Invalid source data format. Ensure the GeoJSON is properly formatted."
@@ -237,6 +252,8 @@ class MapboxTilesetManager:
                 
         except Exception as e:
             logger.error(f"Error creating tileset source: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return {"success": False, "error": str(e)}
     
     def create_tileset(self, tileset_id: str, recipe: Dict, name: str = None) -> Dict[str, Any]:
@@ -244,9 +261,15 @@ class MapboxTilesetManager:
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}?access_token={self.access_token}"
             
+            # Ensure we have a proper name
+            if not name:
+                name = f"Weather data {tileset_id}"
+            
             data = {
                 "recipe": recipe,
-                "name": name or f"Weather data {tileset_id}"
+                "name": name,
+                "description": "Weather visualization data",
+                "private": False
             }
             
             headers = {
@@ -398,7 +421,7 @@ class MapboxTilesetManager:
                             }
                             
                             # Write as line-delimited JSON
-                            f.write(json.dumps(feature) + '\n')
+                            f.write(json.dumps(feature, separators=(',', ':')) + '\n')
                             feature_count += 1
                             
                         except Exception as e:
@@ -609,3 +632,28 @@ class MapboxTilesetManager:
                 
         except Exception as e:
             return {"error": str(e)}
+    
+    def wait_for_processing(self, tileset_id: str, job_id: str, timeout: int = 300) -> Dict[str, Any]:
+        """Wait for tileset processing to complete"""
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            try:
+                status = self.get_tileset_job_status(tileset_id, job_id)
+                
+                if 'error' not in status:
+                    if status.get('stage') == 'success':
+                        logger.info(f"Tileset processing completed successfully")
+                        return {"success": True, "status": status}
+                    elif status.get('stage') == 'failed':
+                        logger.error(f"Tileset processing failed: {status}")
+                        return {"success": False, "error": "Processing failed", "status": status}
+                    else:
+                        logger.info(f"Processing status: {status.get('stage', 'unknown')}")
+                
+                time.sleep(5)  # Check every 5 seconds
+                
+            except Exception as e:
+                logger.error(f"Error checking job status: {e}")
+                
+        return {"success": False, "error": "Processing timeout"}

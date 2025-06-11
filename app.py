@@ -24,6 +24,11 @@ load_dotenv()
 
 # Import modules
 from tileset_management import MapboxTilesetManager
+try:
+    from tileset_management_enhanced import EnhancedMapboxTilesetManager
+except ImportError:
+    EnhancedMapboxTilesetManager = None
+    print("Warning: Enhanced tileset manager not available. Raster-array support disabled.")
 
 # Configure logging
 logging.basicConfig(
@@ -219,6 +224,14 @@ async def upload_netcdf(
     except Exception as e:
         logger.error(f"Error processing file: {str(e)}")
         logger.error(traceback.format_exc())
+        
+        # Clean up file on error
+        if file_path.exists():
+            try:
+                file_path.unlink()
+            except:
+                pass
+                
         return JSONResponse({
             "success": False,
             "error": str(e)
@@ -230,6 +243,12 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
     try:
         ds = xr.open_dataset(file_path)
         
+        # Log file info
+        logger.info(f"Opened NetCDF file: {file_path}")
+        logger.info(f"Dimensions: {dict(ds.dims)}")
+        logger.info(f"Variables: {list(ds.data_vars)}")
+        logger.info(f"Coordinates: {list(ds.coords)}")
+        
         # Extract metadata
         metadata = {
             "dimensions": dict(ds.dims),
@@ -240,9 +259,17 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         
         # Find wind components
         wind_components = find_wind_components(ds)
+        if wind_components:
+            logger.info(f"Found wind components: {wind_components}")
+        else:
+            logger.warning("No wind components found in NetCDF file")
         
         # Get bounds
         bounds = get_dataset_bounds(ds)
+        if bounds:
+            logger.info(f"Dataset bounds: {bounds}")
+        else:
+            logger.warning("Could not determine dataset bounds")
         
         # Generate tileset ID
         if not tileset_name:
@@ -280,7 +307,8 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "wind_components": wind_components,
             "bounds": bounds,
             "visualization_type": visualization_type,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "status": "processing"
         }
         
         ds.close()
@@ -297,7 +325,17 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         
     except Exception as e:
         logger.error(f"Error in process_netcdf_file: {str(e)}")
-        raise
+        import traceback
+        traceback.print_exc()
+        
+        # Try to provide helpful error message
+        error_msg = str(e)
+        if "No such file" in error_msg:
+            error_msg = "NetCDF file could not be read. Please ensure it's a valid NetCDF format."
+        elif "decode" in error_msg:
+            error_msg = "NetCDF file encoding error. The file may be corrupted."
+        
+        raise Exception(error_msg)
 
 def find_wind_components(ds):
     """Find U and V wind components in dataset"""
@@ -352,7 +390,7 @@ def get_dataset_bounds(ds):
 
 async def create_mapbox_tileset_background(file_path: Path, job_id: str, 
                                           tileset_id: str, visualization_type: str):
-    """Background task to create Mapbox tileset"""
+    """Background task to create Mapbox tileset with proper format support"""
     try:
         if not Config.MAPBOX_TOKEN:
             logger.error("Mapbox token not configured")
@@ -361,14 +399,23 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                 active_visualizations[job_id]['error'] = 'Mapbox token not configured'
             return
         
-        manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        # Verify file exists
+        if not file_path.exists():
+            logger.error(f"NetCDF file not found: {file_path}")
+            if job_id in active_visualizations:
+                active_visualizations[job_id]['status'] = 'failed'
+                active_visualizations[job_id]['error'] = 'Input file not found'
+            return
         
         # Create tileset based on visualization type
-        if visualization_type == 'raster-array':
-            # Try raster-array format (may fail on free accounts)
+        if visualization_type == 'raster-array' and EnhancedMapboxTilesetManager:
+            logger.info(f"Creating raster-array tileset for animation...")
+            manager = EnhancedMapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             result = manager.create_raster_array_tileset(str(file_path), tileset_id)
         else:
-            # Use vector format (more reliable)
+            # Use standard vector format
+            logger.info(f"Creating vector tileset...")
+            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             result = manager.process_netcdf_to_tileset(str(file_path), tileset_id, {})
         
         if result['success']:
@@ -377,6 +424,8 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                 active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
                 active_visualizations[job_id]['status'] = 'completed'
                 active_visualizations[job_id]['format'] = result.get('format', visualization_type)
+                active_visualizations[job_id]['upload_id'] = result.get('upload_id')
+                active_visualizations[job_id]['job_id'] = result.get('job_id')
                 
                 # Save recipe info
                 recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
@@ -385,20 +434,51 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     "mapbox_tileset": result['tileset_id'],
                     "created": datetime.now().isoformat(),
                     "format": result.get('format', visualization_type),
-                    "source_layer": "weather_data"
+                    "source_layer": "wind" if visualization_type == 'raster-array' else "weather_data",
+                    "upload_id": result.get('upload_id'),
+                    "job_id": result.get('job_id')
                 }
                 
                 with open(recipe_path, 'w') as f:
                     json.dump(recipe_data, f, indent=2)
                 
                 logger.info(f"Saved recipe info to {recipe_path}")
+                
+                # For raster-array, create style configuration
+                if visualization_type == 'raster-array' and hasattr(manager, 'create_raster_style'):
+                    style = manager.create_raster_style(tileset_id)
+                    style_path = Config.RECIPE_DIR / f"style_{tileset_id}.json"
+                    with open(style_path, 'w') as f:
+                        json.dump(style, f, indent=2)
+                        
+                # If we have a job_id, wait for processing to complete
+                if result.get('job_id') and visualization_type == 'vector':
+                    logger.info(f"Waiting for tileset processing to complete...")
+                    wait_result = manager.wait_for_processing(tileset_id, result['job_id'])
+                    if not wait_result['success']:
+                        logger.warning(f"Processing wait failed: {wait_result.get('error')}")
+                        
         else:
+            error_msg = result.get('error', 'Unknown error')
+            logger.error(f"Tileset creation failed: {error_msg}")
+            
             if job_id in active_visualizations:
                 active_visualizations[job_id]['status'] = 'failed'
-                active_visualizations[job_id]['error'] = result.get('error', 'Unknown error')
+                active_visualizations[job_id]['error'] = error_msg
+                
+                # Provide user-friendly error messages
+                if "No file data" in error_msg:
+                    active_visualizations[job_id]['error'] = "Failed to upload data. Please check your NetCDF file structure."
+                elif "401" in error_msg or "Authentication" in error_msg:
+                    active_visualizations[job_id]['error'] = "Authentication failed. Please check your Mapbox token permissions."
+                elif "422" in error_msg or "Pro account" in error_msg:
+                    active_visualizations[job_id]['error'] = "This feature requires additional Mapbox permissions. Try using Vector format instead."
                 
     except Exception as e:
         logger.error(f"Error creating tileset: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
         if job_id in active_visualizations:
             active_visualizations[job_id]['status'] = 'failed'
             active_visualizations[job_id]['error'] = str(e)
@@ -419,8 +499,26 @@ async def get_visualization_status(job_id: str):
         "error": viz_info.get('error'),
         "metadata": viz_info.get('metadata'),
         "format": viz_info.get('format', 'vector'),
-        "wind_components": viz_info.get('wind_components')
+        "wind_components": viz_info.get('wind_components'),
+        "upload_id": viz_info.get('upload_id')
     })
+
+@app.get("/api/upload-status/{upload_id}")
+async def get_upload_status(upload_id: str):
+    """Check the status of a Mapbox upload"""
+    if not Config.MAPBOX_TOKEN:
+        raise HTTPException(500, "Mapbox token not configured")
+    
+    try:
+        if EnhancedMapboxTilesetManager:
+            manager = EnhancedMapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            status = manager.get_upload_status(upload_id)
+        else:
+            status = {"error": "Enhanced tileset manager not available"}
+        return JSONResponse(status)
+    except Exception as e:
+        logger.error(f"Error getting upload status: {e}")
+        raise HTTPException(500, str(e))
 
 @app.post("/api/load-tileset")
 async def load_tileset(tileset_id: str = Form(...)):
@@ -446,6 +544,7 @@ async def load_tileset(tileset_id: str = Form(...)):
         
         format_type = 'vector'  # Default
         source_layer = 'weather_data'
+        layer_config = {}
         
         if recipe_files:
             try:
@@ -454,9 +553,34 @@ async def load_tileset(tileset_id: str = Form(...)):
                     format_type = recipe_data.get('format', 'vector')
                     source_layer = recipe_data.get('source_layer', 'weather_data')
                     
+                    # For raster-array, provide particle configuration
+                    if format_type == 'raster-array':
+                        layer_config = {
+                            "particle_config": {
+                                "speed_factor": 0.4,
+                                "fade_opacity": 0.9,
+                                "reset_rate": 0.4,
+                                "count": 4000,
+                                "max_speed": 40
+                            },
+                            "color_ramp": "wind"
+                        }
+                    
                 logger.info(f"Found recipe for {tileset_name}, format: {format_type}")
             except Exception as e:
                 logger.error(f"Error reading recipe: {e}")
+        
+        # Check if tileset exists on Mapbox
+        if Config.MAPBOX_TOKEN:
+            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            tileset_info = manager.get_tileset_status(tileset_name)
+            
+            if 'error' not in tileset_info:
+                # Tileset exists, check its type from metadata
+                if 'vector_layers' in tileset_info:
+                    format_type = 'vector'
+                elif tileset_info.get('type') == 'raster':
+                    format_type = 'raster-array'
         
         return JSONResponse({
             "success": True,
@@ -465,7 +589,8 @@ async def load_tileset(tileset_id: str = Form(...)):
             "format": format_type,
             "config": {
                 "source_layer": source_layer,
-                "visualization_type": format_type
+                "visualization_type": format_type,
+                **layer_config
             }
         })
         
@@ -550,6 +675,23 @@ async def startup_event():
     logger.info(f"Mapbox Token Set: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
     logger.info(f"Mapbox Public Token Set: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
     
+    # Check AWS credentials for raster uploads
+    aws_configured = all([
+        os.getenv("AWS_ACCESS_KEY_ID"),
+        os.getenv("AWS_SECRET_ACCESS_KEY")
+    ])
+    
+    if not aws_configured:
+        logger.warning("AWS credentials not configured. Raster-array uploads will use Mapbox's temporary credentials.")
+    else:
+        logger.info("AWS credentials configured for direct S3 uploads")
+    
+    # Check if enhanced manager is available
+    if EnhancedMapboxTilesetManager:
+        logger.info("Enhanced tileset manager available - raster-array support enabled")
+    else:
+        logger.warning("Enhanced tileset manager not available - only vector format supported")
+    
     # Run cleanup
     await cleanup_old_files()
     
@@ -559,6 +701,7 @@ async def startup_event():
             manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             tilesets = manager.list_tilesets(limit=1)
             logger.info(f"Mapbox connection successful. Found {len(tilesets)} tilesets.")
+            
         except Exception as e:
             logger.error(f"Mapbox connection test failed: {e}")
 
