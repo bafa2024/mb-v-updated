@@ -453,7 +453,7 @@ def get_dataset_bounds(ds):
 
 async def create_mapbox_tileset_background(file_path: Path, job_id: str, 
                                           tileset_id: str, visualization_type: str):
-    """Background task to create Mapbox tileset with proper error handling"""
+    """Background task to create Mapbox tileset with proper format support"""
     try:
         if not Config.MAPBOX_TOKEN:
             logger.error("Mapbox token not configured")
@@ -473,52 +473,70 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                 active_visualizations[job_id]['error'] = 'Input file not found'
             return
         
-        # For now, always use vector format (raster-array requires Pro account)
-        logger.info(f"Creating vector tileset from {file_path_str}")
-        
-        manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-        
-        # Process NetCDF to tileset
-        result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
-        
-        if result['success']:
-            # Update visualization info
-            if job_id in active_visualizations:
-                active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
-                active_visualizations[job_id]['status'] = 'completed'
-                active_visualizations[job_id]['format'] = result.get('format', 'vector')
-                active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
-                active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
-                active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
-                
-                # Save recipe info
-                recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
-                recipe_data = {
-                    "tileset_id": tileset_id,
-                    "mapbox_tileset": result['tileset_id'],
-                    "created": datetime.now().isoformat(),
-                    "format": result.get('format', 'vector'),
-                    "source_layer": result.get('source_layer', 'weather_data'),
-                    "recipe_id": result.get('recipe_id'),
-                    "publish_job_id": result.get('publish_job_id'),
-                    "scalar_vars": active_visualizations[job_id].get("scalar_vars", []),
-                    "vector_pairs": active_visualizations[job_id].get("vector_pairs", [])
-                }
-                
-                try:
-                    with open(str(recipe_path), 'w') as f:
-                        json.dump(recipe_data, f, indent=2)
-                    logger.info(f"Saved recipe info to {recipe_path}")
-                except Exception as e:
-                    logger.error(f"Failed to save recipe: {e}")
-                        
-        else:
-            error_msg = result.get('error', 'Unknown error')
-            logger.error(f"Tileset creation failed: {error_msg}")
+        # Check if user requested raster-array format
+        if visualization_type == 'raster-array':
+            logger.info(f"User requested raster-array format for animation")
             
-            if job_id in active_visualizations:
-                active_visualizations[job_id]['status'] = 'failed'
-                active_visualizations[job_id]['error'] = error_msg
+            # Try to create raster-array tileset
+            try:
+                manager = MTSRasterManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+                result = await manager.create_raster_tileset(file_path_str, tileset_id)
+                
+                if result['success']:
+                    logger.info("Successfully created raster-array tileset!")
+                    # Update visualization info for raster
+                    if job_id in active_visualizations:
+                        active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
+                        active_visualizations[job_id]['status'] = 'completed'
+                        active_visualizations[job_id]['format'] = 'raster-array'
+                        active_visualizations[job_id]['source_layer'] = result.get('source_layer', '10winds')
+                        active_visualizations[job_id]['visualization_type'] = 'raster-array'
+                        
+                        # Save recipe info
+                        save_recipe_info(job_id, tileset_id, result, 'raster-array')
+                    return
+                    
+                elif result.get('fallback_to_vector') or result.get('error_code') == 422:
+                    # Pro account required - inform user but fall back to vector
+                    logger.warning("Raster-array requires Pro account, falling back to vector")
+                    if job_id in active_visualizations:
+                        active_visualizations[job_id]['warning'] = 'Raster-array animation requires a Mapbox Pro account. Creating static (vector) visualization instead.'
+                    visualization_type = 'vector'
+                else:
+                    # Other error - still try vector as fallback
+                    logger.error(f"Raster creation failed: {result.get('error')}")
+                    visualization_type = 'vector'
+                    
+            except Exception as e:
+                logger.error(f"Error creating raster tileset: {e}")
+                # Fall back to vector
+                visualization_type = 'vector'
+        
+        # Create vector tileset (either as primary choice or fallback)
+        if visualization_type == 'vector':
+            logger.info(f"Creating vector tileset for static visualization")
+            
+            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
+            
+            if result['success']:
+                # Update visualization info for vector
+                if job_id in active_visualizations:
+                    active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
+                    active_visualizations[job_id]['status'] = 'completed'
+                    active_visualizations[job_id]['format'] = 'vector'
+                    active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
+                    active_visualizations[job_id]['visualization_type'] = 'vector'
+                    
+                    # Save recipe info
+                    save_recipe_info(job_id, tileset_id, result, 'vector')
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                logger.error(f"Tileset creation failed: {error_msg}")
+                
+                if job_id in active_visualizations:
+                    active_visualizations[job_id]['status'] = 'failed'
+                    active_visualizations[job_id]['error'] = error_msg
                 
     except Exception as e:
         logger.error(f"Error creating tileset: {str(e)}")
@@ -528,6 +546,32 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
         if job_id in active_visualizations:
             active_visualizations[job_id]['status'] = 'failed'
             active_visualizations[job_id]['error'] = str(e)
+
+def save_recipe_info(job_id: str, tileset_id: str, result: Dict, format_type: str):
+    """Save recipe information for later reference"""
+    try:
+        recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
+        recipe_data = {
+            "tileset_id": tileset_id,
+            "mapbox_tileset": result['tileset_id'],
+            "created": datetime.now().isoformat(),
+            "format": format_type,
+            "source_layer": result.get('source_layer', 'weather_data' if format_type == 'vector' else '10winds'),
+            "recipe_id": result.get('recipe_id'),
+            "publish_job_id": result.get('publish_job_id'),
+            "visualization_type": format_type
+        }
+        
+        if job_id in active_visualizations:
+            recipe_data["scalar_vars"] = active_visualizations[job_id].get("scalar_vars", [])
+            recipe_data["vector_pairs"] = active_visualizations[job_id].get("vector_pairs", [])
+            recipe_data["wind_components"] = active_visualizations[job_id].get("wind_components")
+        
+        with open(str(recipe_path), 'w') as f:
+            json.dump(recipe_data, f, indent=2)
+        logger.info(f"Saved recipe info to {recipe_path}")
+    except Exception as e:
+        logger.error(f"Failed to save recipe: {e}")
 
 @app.get("/api/visualization-status/{job_id}")
 async def get_visualization_status(job_id: str):
@@ -550,7 +594,8 @@ async def get_visualization_status(job_id: str):
         "scalar_vars": viz_info.get('scalar_vars', []),
         "vector_pairs": viz_info.get('vector_pairs', []),
         "source_layer": viz_info.get('source_layer'),
-        "publish_job_id": viz_info.get('publish_job_id')
+        "publish_job_id": viz_info.get('publish_job_id'),
+        "visualization_type": viz_info.get('visualization_type', 'vector')
     })
 
 @app.get("/api/tileset-status/{username}/{tileset_id}")

@@ -1397,6 +1397,253 @@
         }
     `;
     document.head.appendChild(style);
+
+    // Add this to your main_weather_map.html for client-side wind animation
+// This works with vector data on free accounts
+
+class WindAnimation {
+    constructor(map, windData) {
+        this.map = map;
+        this.windData = windData;
+        this.canvas = null;
+        this.particles = [];
+        this.animationFrame = null;
+        this.particleCount = 2000;
+        this.speedFactor = 0.5;
+        this.fadeOpacity = 0.98;
+        
+        this.init();
+    }
+    
+    init() {
+        // Create canvas overlay
+        this.canvas = document.createElement('canvas');
+        this.canvas.style.position = 'absolute';
+        this.canvas.style.top = '0';
+        this.canvas.style.left = '0';
+        this.canvas.style.pointerEvents = 'none';
+        this.canvas.style.zIndex = '999';
+        
+        this.map.getContainer().appendChild(this.canvas);
+        this.ctx = this.canvas.getContext('2d');
+        
+        // Initialize particles
+        this.initParticles();
+        
+        // Handle map events
+        this.map.on('move', () => this.updateCanvas());
+        this.map.on('resize', () => this.updateCanvas());
+        
+        this.updateCanvas();
+        this.animate();
+    }
+    
+    updateCanvas() {
+        const container = this.map.getContainer();
+        this.canvas.width = container.offsetWidth;
+        this.canvas.height = container.offsetHeight;
+    }
+    
+    initParticles() {
+        this.particles = [];
+        const bounds = this.map.getBounds();
+        
+        for (let i = 0; i < this.particleCount; i++) {
+            this.particles.push({
+                lng: Math.random() * (bounds.getEast() - bounds.getWest()) + bounds.getWest(),
+                lat: Math.random() * (bounds.getNorth() - bounds.getSouth()) + bounds.getSouth(),
+                age: Math.random() * 100,
+                maxAge: 100 + Math.random() * 100
+            });
+        }
+    }
+    
+    getWindAtPoint(lng, lat) {
+        // Find nearest wind data point
+        let minDist = Infinity;
+        let nearestWind = { u: 0, v: 0 };
+        
+        for (const point of this.windData) {
+            const dist = Math.sqrt(
+                Math.pow(point.lng - lng, 2) + 
+                Math.pow(point.lat - lat, 2)
+            );
+            
+            if (dist < minDist) {
+                minDist = dist;
+                nearestWind = { u: point.u, v: point.v };
+            }
+        }
+        
+        return nearestWind;
+    }
+    
+    updateParticle(particle) {
+        const wind = this.getWindAtPoint(particle.lng, particle.lat);
+        
+        // Update position based on wind
+        const scale = 0.0001 * this.speedFactor;
+        particle.lng += wind.u * scale;
+        particle.lat += wind.v * scale;
+        
+        particle.age++;
+        
+        // Reset if out of bounds or too old
+        const bounds = this.map.getBounds();
+        if (particle.age > particle.maxAge ||
+            particle.lng < bounds.getWest() || 
+            particle.lng > bounds.getEast() ||
+            particle.lat < bounds.getSouth() || 
+            particle.lat > bounds.getNorth()) {
+            
+            particle.lng = Math.random() * (bounds.getEast() - bounds.getWest()) + bounds.getWest();
+            particle.lat = Math.random() * (bounds.getNorth() - bounds.getSouth()) + bounds.getSouth();
+            particle.age = 0;
+            particle.maxAge = 100 + Math.random() * 100;
+        }
+    }
+    
+    drawParticle(particle) {
+        const point = this.map.project([particle.lng, particle.lat]);
+        const wind = this.getWindAtPoint(particle.lng, particle.lat);
+        const speed = Math.sqrt(wind.u * wind.u + wind.v * wind.v);
+        
+        // Color based on speed
+        const hue = 220 - Math.min(speed * 4, 220);
+        const opacity = 1 - (particle.age / particle.maxAge);
+        
+        this.ctx.beginPath();
+        this.ctx.arc(point.x, point.y, 1.5, 0, 2 * Math.PI);
+        this.ctx.fillStyle = `hsla(${hue}, 80%, 60%, ${opacity})`;
+        this.ctx.fill();
+    }
+    
+    animate() {
+        // Fade effect
+        this.ctx.fillStyle = `rgba(0, 0, 0, ${1 - this.fadeOpacity})`;
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        // Update and draw particles
+        for (const particle of this.particles) {
+            this.updateParticle(particle);
+            this.drawParticle(particle);
+        }
+        
+        this.animationFrame = requestAnimationFrame(() => this.animate());
+    }
+    
+    setParticleCount(count) {
+        this.particleCount = count;
+        this.initParticles();
+    }
+    
+    setSpeedFactor(factor) {
+        this.speedFactor = factor;
+    }
+    
+    destroy() {
+        if (this.animationFrame) {
+            cancelAnimationFrame(this.animationFrame);
+        }
+        if (this.canvas && this.canvas.parentNode) {
+            this.canvas.parentNode.removeChild(this.canvas);
+        }
+    }
+}
+
+// Function to create client-side animation from vector data
+async function createClientSideAnimation(tilesetId, sourceLayer) {
+    try {
+        showNotification('🎨 Creating client-side wind animation...', 'info');
+        
+        // Query all features from the vector source
+        const features = map.querySourceFeatures('weather-data', {
+            sourceLayer: sourceLayer || 'weather_data'
+        });
+        
+        if (!features || features.length === 0) {
+            showNotification('❌ No wind data found for animation', 'error');
+            return;
+        }
+        
+        // Convert features to wind data format
+        const windData = features.map(f => ({
+            lng: f.geometry.coordinates[0],
+            lat: f.geometry.coordinates[1],
+            u: f.properties.u || 0,
+            v: f.properties.v || 0,
+            speed: f.properties.speed || 0
+        }));
+        
+        console.log(`Creating animation with ${windData.length} data points`);
+        
+        // Create animation
+        if (window.windAnimation) {
+            window.windAnimation.destroy();
+        }
+        
+        window.windAnimation = new WindAnimation(map, windData);
+        
+        // Update controls to work with client-side animation
+        document.getElementById('speedSlider').oninput = function() {
+            const value = parseFloat(this.value);
+            document.getElementById('speedValue').textContent = value;
+            if (window.windAnimation) {
+                window.windAnimation.setSpeedFactor(value);
+            }
+        };
+        
+        document.getElementById('particleSlider').oninput = function() {
+            const value = parseInt(this.value);
+            document.getElementById('particleValue').textContent = value;
+            if (window.windAnimation) {
+                window.windAnimation.setParticleCount(value);
+            }
+        };
+        
+        // Show controls
+        enableWindControls(true);
+        updateVisualizationInfo('Client-Side Wind Animation', 'Vector + Canvas', windData.length);
+        
+        showNotification('✅ Wind animation created!', 'success');
+        
+    } catch (error) {
+        console.error('Error creating client-side animation:', error);
+        showNotification('❌ Failed to create animation', 'error');
+    }
+}
+
+// Add button to toggle between static and animated views for vector data
+function addAnimationToggle() {
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'btn btn-secondary';
+    toggleBtn.innerHTML = '🎬 Toggle Animation';
+    toggleBtn.style.width = '100%';
+    toggleBtn.style.marginTop = '10px';
+    toggleBtn.onclick = function() {
+        if (currentFormat === 'vector') {
+            if (window.windAnimation) {
+                // Destroy animation
+                window.windAnimation.destroy();
+                window.windAnimation = null;
+                showNotification('Animation stopped', 'info');
+                this.innerHTML = '🎬 Start Animation';
+            } else {
+                // Create animation
+                createClientSideAnimation(currentTilesetId, 'weather_data');
+                this.innerHTML = '⏸️ Stop Animation';
+            }
+        } else {
+            showNotification('Animation toggle only works with vector data', 'warning');
+        }
+    };
+    
+    // Add to wind controls section
+    const windControls = document.getElementById('windControls');
+    if (windControls) {
+        windControls.appendChild(toggleBtn);
+    }
+}
 </script>
   
 </body>
