@@ -192,10 +192,10 @@
             width: 200px;
             height: 20px;
             background: linear-gradient(to right, 
-                #3b82f6 0%,
-                #10b981 25%,
-                #f59e0b 50%,
-                #ef4444 75%,
+                #3b82f6 0%, 
+                #10b981 25%, 
+                #f59e0b 50%, 
+                #ef4444 75%, 
                 #8b5cf6 100%
             );
             margin-bottom: 5px;
@@ -361,6 +361,13 @@
             border-radius: 4px;
             border-left: 3px solid #3b82f6;
         }
+        
+        @keyframes slideUp {
+            to {
+                transform: translateX(-50%) translateY(-20px);
+                opacity: 0;
+            }
+        }
     </style>
 </head>
 <body>
@@ -413,6 +420,11 @@
                     <div class="progress-fill" id="progressFill">0%</div>
                 </div>
                 <small id="progressText" style="display: block; margin-top: 5px; color: #9ca3af;">Uploading...</small>
+            </div>
+            
+            <div id="uploadResult" style="display: none; margin-top: 20px;">
+                <h4 style="color: white; margin-bottom: 15px;">File Analysis</h4>
+                <div id="fileMetadata" style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;"></div>
             </div>
         </div>
         
@@ -500,7 +512,6 @@
     <div class="loading" id="loading">
         <div class="spinner"></div>
     </div>
-// Replace the JavaScript section in your main_weather_map.html with this fixed version
 
 <script>
     // Initialize Mapbox
@@ -649,7 +660,7 @@
         }
     }
     
-    // Upload file - FIXED VERSION
+    // Upload file
     async function uploadFile() {
         const fileInput = document.getElementById('fileInput');
         const file = fileInput.files[0];
@@ -738,24 +749,12 @@
         }
         
         html += '</div>';
+        metadataDiv.innerHTML = html;
         
-        // Create metadata display if it doesn't exist
-        if (!metadataDiv) {
-            const uploadResult = document.createElement('div');
-            uploadResult.id = 'uploadResult';
-            uploadResult.innerHTML = `
-                <h4 style="color: white; margin-bottom: 15px;">File Analysis</h4>
-                <div id="fileMetadata" style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;">
-                    ${html}
-                </div>
-            `;
-            document.querySelector('.control-section:nth-child(2)').appendChild(uploadResult);
-        } else {
-            metadataDiv.innerHTML = html;
-        }
+        document.getElementById('uploadResult').style.display = 'block';
     }
     
-    // Check processing status - FIXED VERSION
+    // Check processing status
     async function checkProcessingStatus(jobId, vizType) {
         let checkCount = 0;
         const maxChecks = 120; // 10 minutes max (5 second intervals)
@@ -850,18 +849,34 @@
         if (!optionExists) {
             const option = document.createElement('option');
             option.value = tilesetId;
-            option.setAttribute('data-format', status.format || 'vector');
+            
+            // Use actual_format if available, otherwise fall back to format
+            const actualFormat = status.actual_format || status.format || 'vector';
+            const requestedFormat = status.requested_format || status.visualization_type || 'vector';
+            
+            option.setAttribute('data-format', actualFormat);
+            option.setAttribute('data-requested-format', requestedFormat);
             option.setAttribute('data-type', 'user');
             option.setAttribute('data-source-layer', status.source_layer || 'weather_data');
-            option.textContent = `Uploaded: ${status.tileset_id}`;
+            
+            // Add format indicator to the option text
+            const formatIndicator = actualFormat === 'raster-array' ? '🎬' : '📍';
+            option.textContent = `${formatIndicator} Uploaded: ${status.tileset_id}`;
+            
             selector.appendChild(option);
         }
         
         // Auto-select and load the new tileset
         selector.value = tilesetId;
         
-        // Show notification that visualization is starting
-        showNotification('🎨 Starting visualization... Please wait.', 'info');
+        // Show different notification based on format
+        if (status.actual_format === 'raster-array') {
+            showNotification('🎨 Starting animated visualization... Please wait.', 'info');
+        } else if (status.requested_format === 'raster-array' && status.actual_format === 'vector') {
+            showNotification('ℹ️ Created vector visualization (animation requires Pro account).', 'info');
+        } else {
+            showNotification('🎨 Starting visualization... Please wait.', 'info');
+        }
         
         // Wait a moment for tileset to be fully available
         setTimeout(() => {
@@ -886,7 +901,10 @@
         const tilesetId = event.target.value;
         const selectedOption = event.target.selectedOptions[0];
         const format = selectedOption.getAttribute('data-format') || 'vector';
+        const requestedFormat = selectedOption.getAttribute('data-requested-format') || format;
         const sourceLayer = selectedOption.getAttribute('data-source-layer') || '10winds';
+        
+        console.log(`Loading tileset: ${tilesetId}, format: ${format}, requested: ${requestedFormat}`);
         
         // Clear existing visualization
         clearWindVisualization();
@@ -895,14 +913,15 @@
         document.getElementById('loading').classList.add('active');
         
         // Show notification that visualization is starting
-        showNotification(`🚀 Loading ${format === 'raster-array' ? 'animation' : 'static'} visualization...`, 'info');
+        const formatText = format === 'raster-array' ? 'animation' : 'static';
+        showNotification(`🚀 Loading ${formatText} visualization...`, 'info');
         
         try {
             if (tilesetId === '{{ default_tileset.id }}') {
                 // Load default wind visualization
                 loadDefaultWindVisualization();
             } else {
-                // Load custom tileset
+                // Load custom tileset with format info
                 await loadCustomTileset(tilesetId, format, sourceLayer);
             }
         } catch (error) {
@@ -913,7 +932,7 @@
         }
     }
     
-    // Load custom tileset - FIXED VERSION
+    // Load custom tileset - FIXED VERSION with proper format handling
     async function loadCustomTileset(tilesetId, format, sourceLayer) {
         const formData = new FormData();
         formData.append('tileset_id', tilesetId);
@@ -935,12 +954,19 @@
                 throw new Error(tilesetInfo.error || 'Failed to load tileset');
             }
             
-            const actualFormat = tilesetInfo.format || format;
+            // Use actual_format to determine the real format
+            const actualFormat = tilesetInfo.actual_format || tilesetInfo.format || format;
+            const requestedFormat = tilesetInfo.requested_format || format;
             const actualSourceLayer = tilesetInfo.config?.source_layer || sourceLayer || '10winds';
             
+            console.log(`Requested format: ${requestedFormat}, Actual format: ${actualFormat}`);
+            
+            // Clear any existing layers first
+            clearVisualizationLayers();
+            
             if (actualFormat === 'raster-array') {
-                // Try to load as raster-array for wind animation
-                console.log('Attempting to load raster-array tileset for particle animation');
+                // Load as raster-array for particle animation
+                console.log('Loading raster-array tileset for particle animation');
                 
                 try {
                     // Add the raster-array source
@@ -959,7 +985,7 @@
                         max_speed: 40
                     };
                     
-                    // Add raster-particle layer with proper source-layer
+                    // Add raster-particle layer
                     map.addLayer({
                         'id': 'wind-layer',
                         'type': 'raster-particle',
@@ -995,15 +1021,21 @@
                         map.removeSource('custom-raster-source');
                     }
                     
-                    // Show appropriate message and fall back to vector
-                    showNotification('⚠️ Raster animation not available. Loading vector visualization instead.', 'warning');
+                    // If requested format was raster-array but it failed, show warning
+                    if (requestedFormat === 'raster-array') {
+                        showNotification('⚠️ Raster animation not available. Loading vector visualization instead.', 'warning');
+                    }
                     
                     // Fall back to vector visualization
                     loadVectorVisualization(tilesetId, tilesetInfo);
                 }
             } else {
                 // Load as vector tileset
-                showNotification('🗺️ Loading vector visualization...', 'info');
+                if (requestedFormat === 'raster-array' && actualFormat === 'vector') {
+                    showNotification('ℹ️ This tileset was created as vector format. Loading static visualization.', 'info');
+                } else {
+                    showNotification('🗺️ Loading vector visualization...', 'info');
+                }
                 loadVectorVisualization(tilesetId, tilesetInfo);
             }
             
@@ -1015,7 +1047,7 @@
         currentTilesetId = tilesetId;
     }
     
-    // Load vector visualization - FIXED VERSION
+    // Load vector visualization
     function loadVectorVisualization(tilesetId, tilesetInfo) {
         console.log('Loading vector visualization:', tilesetId);
         
@@ -1219,6 +1251,25 @@
         }
     }
     
+    // Clear visualization layers
+    function clearVisualizationLayers() {
+        // Remove all possible layers
+        const layers = ['wind-layer', 'wind-heatmap', 'wind-points', 'wind-arrows'];
+        layers.forEach(layerId => {
+            if (map.getLayer(layerId)) {
+                map.removeLayer(layerId);
+            }
+        });
+        
+        // Remove all possible sources
+        const sources = ['mapbox-wind', 'custom-source', 'custom-raster-source', 'weather-data', 'wind-source'];
+        sources.forEach(sourceId => {
+            if (map.getSource(sourceId)) {
+                map.removeSource(sourceId);
+            }
+        });
+    }
+    
     // Update wind parameters
     function updateWindParams(event) {
         const slider = event.target;
@@ -1397,253 +1448,6 @@
         }
     `;
     document.head.appendChild(style);
-
-    // Add this to your main_weather_map.html for client-side wind animation
-// This works with vector data on free accounts
-
-class WindAnimation {
-    constructor(map, windData) {
-        this.map = map;
-        this.windData = windData;
-        this.canvas = null;
-        this.particles = [];
-        this.animationFrame = null;
-        this.particleCount = 2000;
-        this.speedFactor = 0.5;
-        this.fadeOpacity = 0.98;
-        
-        this.init();
-    }
-    
-    init() {
-        // Create canvas overlay
-        this.canvas = document.createElement('canvas');
-        this.canvas.style.position = 'absolute';
-        this.canvas.style.top = '0';
-        this.canvas.style.left = '0';
-        this.canvas.style.pointerEvents = 'none';
-        this.canvas.style.zIndex = '999';
-        
-        this.map.getContainer().appendChild(this.canvas);
-        this.ctx = this.canvas.getContext('2d');
-        
-        // Initialize particles
-        this.initParticles();
-        
-        // Handle map events
-        this.map.on('move', () => this.updateCanvas());
-        this.map.on('resize', () => this.updateCanvas());
-        
-        this.updateCanvas();
-        this.animate();
-    }
-    
-    updateCanvas() {
-        const container = this.map.getContainer();
-        this.canvas.width = container.offsetWidth;
-        this.canvas.height = container.offsetHeight;
-    }
-    
-    initParticles() {
-        this.particles = [];
-        const bounds = this.map.getBounds();
-        
-        for (let i = 0; i < this.particleCount; i++) {
-            this.particles.push({
-                lng: Math.random() * (bounds.getEast() - bounds.getWest()) + bounds.getWest(),
-                lat: Math.random() * (bounds.getNorth() - bounds.getSouth()) + bounds.getSouth(),
-                age: Math.random() * 100,
-                maxAge: 100 + Math.random() * 100
-            });
-        }
-    }
-    
-    getWindAtPoint(lng, lat) {
-        // Find nearest wind data point
-        let minDist = Infinity;
-        let nearestWind = { u: 0, v: 0 };
-        
-        for (const point of this.windData) {
-            const dist = Math.sqrt(
-                Math.pow(point.lng - lng, 2) + 
-                Math.pow(point.lat - lat, 2)
-            );
-            
-            if (dist < minDist) {
-                minDist = dist;
-                nearestWind = { u: point.u, v: point.v };
-            }
-        }
-        
-        return nearestWind;
-    }
-    
-    updateParticle(particle) {
-        const wind = this.getWindAtPoint(particle.lng, particle.lat);
-        
-        // Update position based on wind
-        const scale = 0.0001 * this.speedFactor;
-        particle.lng += wind.u * scale;
-        particle.lat += wind.v * scale;
-        
-        particle.age++;
-        
-        // Reset if out of bounds or too old
-        const bounds = this.map.getBounds();
-        if (particle.age > particle.maxAge ||
-            particle.lng < bounds.getWest() || 
-            particle.lng > bounds.getEast() ||
-            particle.lat < bounds.getSouth() || 
-            particle.lat > bounds.getNorth()) {
-            
-            particle.lng = Math.random() * (bounds.getEast() - bounds.getWest()) + bounds.getWest();
-            particle.lat = Math.random() * (bounds.getNorth() - bounds.getSouth()) + bounds.getSouth();
-            particle.age = 0;
-            particle.maxAge = 100 + Math.random() * 100;
-        }
-    }
-    
-    drawParticle(particle) {
-        const point = this.map.project([particle.lng, particle.lat]);
-        const wind = this.getWindAtPoint(particle.lng, particle.lat);
-        const speed = Math.sqrt(wind.u * wind.u + wind.v * wind.v);
-        
-        // Color based on speed
-        const hue = 220 - Math.min(speed * 4, 220);
-        const opacity = 1 - (particle.age / particle.maxAge);
-        
-        this.ctx.beginPath();
-        this.ctx.arc(point.x, point.y, 1.5, 0, 2 * Math.PI);
-        this.ctx.fillStyle = `hsla(${hue}, 80%, 60%, ${opacity})`;
-        this.ctx.fill();
-    }
-    
-    animate() {
-        // Fade effect
-        this.ctx.fillStyle = `rgba(0, 0, 0, ${1 - this.fadeOpacity})`;
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-        
-        // Update and draw particles
-        for (const particle of this.particles) {
-            this.updateParticle(particle);
-            this.drawParticle(particle);
-        }
-        
-        this.animationFrame = requestAnimationFrame(() => this.animate());
-    }
-    
-    setParticleCount(count) {
-        this.particleCount = count;
-        this.initParticles();
-    }
-    
-    setSpeedFactor(factor) {
-        this.speedFactor = factor;
-    }
-    
-    destroy() {
-        if (this.animationFrame) {
-            cancelAnimationFrame(this.animationFrame);
-        }
-        if (this.canvas && this.canvas.parentNode) {
-            this.canvas.parentNode.removeChild(this.canvas);
-        }
-    }
-}
-
-// Function to create client-side animation from vector data
-async function createClientSideAnimation(tilesetId, sourceLayer) {
-    try {
-        showNotification('🎨 Creating client-side wind animation...', 'info');
-        
-        // Query all features from the vector source
-        const features = map.querySourceFeatures('weather-data', {
-            sourceLayer: sourceLayer || 'weather_data'
-        });
-        
-        if (!features || features.length === 0) {
-            showNotification('❌ No wind data found for animation', 'error');
-            return;
-        }
-        
-        // Convert features to wind data format
-        const windData = features.map(f => ({
-            lng: f.geometry.coordinates[0],
-            lat: f.geometry.coordinates[1],
-            u: f.properties.u || 0,
-            v: f.properties.v || 0,
-            speed: f.properties.speed || 0
-        }));
-        
-        console.log(`Creating animation with ${windData.length} data points`);
-        
-        // Create animation
-        if (window.windAnimation) {
-            window.windAnimation.destroy();
-        }
-        
-        window.windAnimation = new WindAnimation(map, windData);
-        
-        // Update controls to work with client-side animation
-        document.getElementById('speedSlider').oninput = function() {
-            const value = parseFloat(this.value);
-            document.getElementById('speedValue').textContent = value;
-            if (window.windAnimation) {
-                window.windAnimation.setSpeedFactor(value);
-            }
-        };
-        
-        document.getElementById('particleSlider').oninput = function() {
-            const value = parseInt(this.value);
-            document.getElementById('particleValue').textContent = value;
-            if (window.windAnimation) {
-                window.windAnimation.setParticleCount(value);
-            }
-        };
-        
-        // Show controls
-        enableWindControls(true);
-        updateVisualizationInfo('Client-Side Wind Animation', 'Vector + Canvas', windData.length);
-        
-        showNotification('✅ Wind animation created!', 'success');
-        
-    } catch (error) {
-        console.error('Error creating client-side animation:', error);
-        showNotification('❌ Failed to create animation', 'error');
-    }
-}
-
-// Add button to toggle between static and animated views for vector data
-function addAnimationToggle() {
-    const toggleBtn = document.createElement('button');
-    toggleBtn.className = 'btn btn-secondary';
-    toggleBtn.innerHTML = '🎬 Toggle Animation';
-    toggleBtn.style.width = '100%';
-    toggleBtn.style.marginTop = '10px';
-    toggleBtn.onclick = function() {
-        if (currentFormat === 'vector') {
-            if (window.windAnimation) {
-                // Destroy animation
-                window.windAnimation.destroy();
-                window.windAnimation = null;
-                showNotification('Animation stopped', 'info');
-                this.innerHTML = '🎬 Start Animation';
-            } else {
-                // Create animation
-                createClientSideAnimation(currentTilesetId, 'weather_data');
-                this.innerHTML = '⏸️ Stop Animation';
-            }
-        } else {
-            showNotification('Animation toggle only works with vector data', 'warning');
-        }
-    };
-    
-    // Add to wind controls section
-    const windControls = document.getElementById('windControls');
-    if (windControls) {
-        windControls.appendChild(toggleBtn);
-    }
-}
 </script>
   
 </body>

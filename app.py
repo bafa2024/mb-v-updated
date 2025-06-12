@@ -357,14 +357,15 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         
         logger.info(f"Generated tileset_id: {tileset_id}")
         
-        # Store visualization info
+        # Store visualization info with requested type
         active_visualizations[job_id] = {
             "file_path": str(file_path),
             "tileset_id": tileset_id,
             "metadata": metadata,
             "wind_components": wind_components,
             "bounds": bounds,
-            "visualization_type": visualization_type,
+            "visualization_type": visualization_type,  # Store the requested type
+            "requested_format": "raster-array" if visualization_type == "raster-array" else "vector",
             "created_at": datetime.now().isoformat(),
             "status": "processing",
             "scalar_vars": scalar_vars,
@@ -381,6 +382,7 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "wind_components": wind_components,
             "bounds": bounds,
             "visualization_type": visualization_type,
+            "requested_format": "raster-array" if visualization_type == "raster-array" else "vector",
             "scalar_vars": scalar_vars,
             "vector_pairs": vector_pairs,
             "previews": previews
@@ -453,7 +455,7 @@ def get_dataset_bounds(ds):
 
 async def create_mapbox_tileset_background(file_path: Path, job_id: str, 
                                           tileset_id: str, visualization_type: str):
-    """Background task to create Mapbox tileset with proper format support"""
+    """Background task to create Mapbox tileset with proper error handling"""
     try:
         if not Config.MAPBOX_TOKEN:
             logger.error("Mapbox token not configured")
@@ -473,70 +475,84 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                 active_visualizations[job_id]['error'] = 'Input file not found'
             return
         
-        # Check if user requested raster-array format
-        if visualization_type == 'raster-array':
-            logger.info(f"User requested raster-array format for animation")
-            
-            # Try to create raster-array tileset
-            try:
-                manager = MTSRasterManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-                result = await manager.create_raster_tileset(file_path_str, tileset_id)
-                
-                if result['success']:
-                    logger.info("Successfully created raster-array tileset!")
-                    # Update visualization info for raster
-                    if job_id in active_visualizations:
-                        active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
-                        active_visualizations[job_id]['status'] = 'completed'
-                        active_visualizations[job_id]['format'] = 'raster-array'
-                        active_visualizations[job_id]['source_layer'] = result.get('source_layer', '10winds')
-                        active_visualizations[job_id]['visualization_type'] = 'raster-array'
-                        
-                        # Save recipe info
-                        save_recipe_info(job_id, tileset_id, result, 'raster-array')
-                    return
-                    
-                elif result.get('fallback_to_vector') or result.get('error_code') == 422:
-                    # Pro account required - inform user but fall back to vector
-                    logger.warning("Raster-array requires Pro account, falling back to vector")
-                    if job_id in active_visualizations:
-                        active_visualizations[job_id]['warning'] = 'Raster-array animation requires a Mapbox Pro account. Creating static (vector) visualization instead.'
-                    visualization_type = 'vector'
-                else:
-                    # Other error - still try vector as fallback
-                    logger.error(f"Raster creation failed: {result.get('error')}")
-                    visualization_type = 'vector'
-                    
-            except Exception as e:
-                logger.error(f"Error creating raster tileset: {e}")
-                # Fall back to vector
-                visualization_type = 'vector'
+        # Get the requested format from active_visualizations
+        requested_format = active_visualizations[job_id].get('requested_format', 'vector')
         
-        # Create vector tileset (either as primary choice or fallback)
-        if visualization_type == 'vector':
-            logger.info(f"Creating vector tileset for static visualization")
+        logger.info(f"Creating {requested_format} tileset from {file_path_str}")
+        
+        # Check if raster-array was requested
+        if requested_format == 'raster-array' and Config.MAPBOX_TOKEN:
+            # First try raster-array if requested
+            logger.info("Attempting to create raster-array tileset...")
             
-            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-            result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
+            # Import MTS Raster Manager
+            raster_manager = MTSRasterManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            
+            # Try to create raster tileset
+            result = await raster_manager.create_raster_tileset(file_path_str, tileset_id)
             
             if result['success']:
-                # Update visualization info for vector
+                # Update visualization info
                 if job_id in active_visualizations:
                     active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
                     active_visualizations[job_id]['status'] = 'completed'
-                    active_visualizations[job_id]['format'] = 'vector'
-                    active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
-                    active_visualizations[job_id]['visualization_type'] = 'vector'
+                    active_visualizations[job_id]['format'] = 'raster-array'
+                    active_visualizations[job_id]['actual_format'] = 'raster-array'
+                    active_visualizations[job_id]['source_layer'] = result.get('source_layer', '10winds')
+                    active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
+                    active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
                     
                     # Save recipe info
-                    save_recipe_info(job_id, tileset_id, result, 'vector')
+                    save_recipe_info(tileset_id, result, active_visualizations[job_id])
+                    
+                logger.info("Successfully created raster-array tileset")
+                return
             else:
-                error_msg = result.get('error', 'Unknown error')
-                logger.error(f"Tileset creation failed: {error_msg}")
+                # Check if it's a Pro account issue
+                if result.get('fallback_to_vector', False):
+                    logger.warning("Raster-array requires Pro account, falling back to vector")
+                    if job_id in active_visualizations:
+                        active_visualizations[job_id]['warning'] = result.get('error', 'Falling back to vector format')
+                else:
+                    # Some other error occurred
+                    logger.error(f"Raster tileset creation failed: {result.get('error')}")
+                    if job_id in active_visualizations:
+                        active_visualizations[job_id]['error'] = result.get('error')
+        
+        # Fall back to vector format
+        logger.info("Creating vector tileset...")
+        
+        manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        
+        # Process NetCDF to tileset
+        result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
+        
+        if result['success']:
+            # Update visualization info
+            if job_id in active_visualizations:
+                active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
+                active_visualizations[job_id]['status'] = 'completed'
+                active_visualizations[job_id]['format'] = 'vector'
+                active_visualizations[job_id]['actual_format'] = 'vector'
+                active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
+                active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
+                active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
                 
-                if job_id in active_visualizations:
-                    active_visualizations[job_id]['status'] = 'failed'
-                    active_visualizations[job_id]['error'] = error_msg
+                # Add warning if raster was requested but vector was created
+                if requested_format == 'raster-array':
+                    active_visualizations[job_id]['format_fallback'] = True
+                    active_visualizations[job_id]['warning'] = 'Created vector format (raster-array requires Pro account)'
+                
+                # Save recipe info
+                save_recipe_info(tileset_id, result, active_visualizations[job_id])
+                        
+        else:
+            error_msg = result.get('error', 'Unknown error')
+            logger.error(f"Tileset creation failed: {error_msg}")
+            
+            if job_id in active_visualizations:
+                active_visualizations[job_id]['status'] = 'failed'
+                active_visualizations[job_id]['error'] = error_msg
                 
     except Exception as e:
         logger.error(f"Error creating tileset: {str(e)}")
@@ -547,26 +563,25 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
             active_visualizations[job_id]['status'] = 'failed'
             active_visualizations[job_id]['error'] = str(e)
 
-def save_recipe_info(job_id: str, tileset_id: str, result: Dict, format_type: str):
-    """Save recipe information for later reference"""
+def save_recipe_info(tileset_id: str, result: Dict, viz_info: Dict):
+    """Save recipe information for future reference"""
+    recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
+    recipe_data = {
+        "tileset_id": tileset_id,
+        "mapbox_tileset": result['tileset_id'],
+        "created": datetime.now().isoformat(),
+        "format": result.get('format', 'vector'),
+        "actual_format": result.get('format', 'vector'),
+        "requested_format": viz_info.get('requested_format', 'vector'),
+        "source_layer": result.get('source_layer', 'weather_data'),
+        "recipe_id": result.get('recipe_id'),
+        "publish_job_id": result.get('publish_job_id'),
+        "scalar_vars": viz_info.get("scalar_vars", []),
+        "vector_pairs": viz_info.get("vector_pairs", []),
+        "visualization_type": viz_info.get('visualization_type', 'vector')
+    }
+    
     try:
-        recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
-        recipe_data = {
-            "tileset_id": tileset_id,
-            "mapbox_tileset": result['tileset_id'],
-            "created": datetime.now().isoformat(),
-            "format": format_type,
-            "source_layer": result.get('source_layer', 'weather_data' if format_type == 'vector' else '10winds'),
-            "recipe_id": result.get('recipe_id'),
-            "publish_job_id": result.get('publish_job_id'),
-            "visualization_type": format_type
-        }
-        
-        if job_id in active_visualizations:
-            recipe_data["scalar_vars"] = active_visualizations[job_id].get("scalar_vars", [])
-            recipe_data["vector_pairs"] = active_visualizations[job_id].get("vector_pairs", [])
-            recipe_data["wind_components"] = active_visualizations[job_id].get("wind_components")
-        
         with open(str(recipe_path), 'w') as f:
             json.dump(recipe_data, f, indent=2)
         logger.info(f"Saved recipe info to {recipe_path}")
@@ -590,6 +605,8 @@ async def get_visualization_status(job_id: str):
         "warning": viz_info.get('warning'),
         "metadata": viz_info.get('metadata'),
         "format": viz_info.get('format', 'vector'),
+        "actual_format": viz_info.get('actual_format', viz_info.get('format', 'vector')),
+        "requested_format": viz_info.get('requested_format', 'vector'),
         "wind_components": viz_info.get('wind_components'),
         "scalar_vars": viz_info.get('scalar_vars', []),
         "vector_pairs": viz_info.get('vector_pairs', []),
@@ -639,6 +656,7 @@ async def load_tileset(tileset_id: str = Form(...)):
                 "tileset_id": tileset_id,
                 "type": "default",
                 "format": "raster-array",
+                "actual_format": "raster-array",
                 "config": {
                     "layers": ["wind"],
                     "wind_source": tileset_id,
@@ -651,21 +669,27 @@ async def load_tileset(tileset_id: str = Form(...)):
         recipe_files = list(Config.RECIPE_DIR.glob(f"*{tileset_name}*.json"))
         
         format_type = 'vector'  # Default
+        actual_format = 'vector'
+        requested_format = 'vector'
         source_layer = 'weather_data'
         layer_config = {}
         scalar_vars = []
         vector_pairs = []
+        visualization_type = 'vector'
         
         if recipe_files:
             try:
                 with open(recipe_files[0], 'r') as f:
                     recipe_data = json.load(f)
                     format_type = recipe_data.get('format', 'vector')
+                    actual_format = recipe_data.get('actual_format', format_type)
+                    requested_format = recipe_data.get('requested_format', format_type)
                     source_layer = recipe_data.get('source_layer', 'weather_data')
                     scalar_vars = recipe_data.get('scalar_vars', [])
                     vector_pairs = recipe_data.get('vector_pairs', [])
+                    visualization_type = recipe_data.get('visualization_type', 'vector')
                     
-                logger.info(f"Found recipe for {tileset_name}, format: {format_type}")
+                logger.info(f"Found recipe for {tileset_name}, format: {format_type}, actual: {actual_format}, requested: {requested_format}")
             except Exception as e:
                 logger.error(f"Error reading recipe: {e}")
         
@@ -677,17 +701,26 @@ async def load_tileset(tileset_id: str = Form(...)):
             if 'error' not in tileset_info:
                 # Tileset exists
                 logger.info(f"Tileset {tileset_name} exists on Mapbox")
+                
+                # Check the actual tileset type from Mapbox
+                if 'type' in tileset_info:
+                    mapbox_type = tileset_info['type']
+                    if 'raster' in mapbox_type.lower():
+                        actual_format = 'raster-array'
         
         return JSONResponse({
             "success": True,
             "tileset_id": tileset_id,
             "type": "user",
             "format": format_type,
+            "actual_format": actual_format,
+            "requested_format": requested_format,
             "config": {
                 "source_layer": source_layer,
-                "visualization_type": format_type,
+                "visualization_type": visualization_type,
                 "scalar_vars": scalar_vars,
-                "vector_pairs": vector_pairs
+                "vector_pairs": vector_pairs,
+                "format": actual_format
             }
         })
         
@@ -710,6 +743,8 @@ async def get_active_visualizations():
                 "status": viz.get('status', 'processing'),
                 "created_at": viz.get('created_at'),
                 "format": viz.get('format', 'vector'),
+                "actual_format": viz.get('actual_format', viz.get('format', 'vector')),
+                "requested_format": viz.get('requested_format', 'vector'),
                 "wind_components": viz.get('wind_components'),
                 "scalar_vars": viz.get('scalar_vars', []),
                 "vector_pairs": viz.get('vector_pairs', [])
