@@ -1,7 +1,6 @@
 """
 Mapbox Tileset Management Module - Fixed Version
 Handles creation and management of Mapbox tilesets from NetCDF data
-Fixed: Proper file upload handling for tileset sources
 """
 
 import os
@@ -27,103 +26,8 @@ class MapboxTilesetManager:
         self.username = username
         self.api_base = "https://api.mapbox.com"
         
-    def create_raster_array_tileset(self, netcdf_path: str, tileset_id: str) -> Dict[str, Any]:
-        """
-        Attempt to create raster-array tileset (requires pro account)
-        Falls back to vector format if raster upload fails
-        """
-        logger.info("Attempting raster-array tileset creation...")
-        
-        try:
-            # Try to convert to GeoTIFF and upload
-            from utils.raster_converter import RasterConverter
-            
-            # Convert NetCDF to GeoTIFF
-            geotiff_path = tempfile.mktemp(suffix='.tif')
-            success = RasterConverter.netcdf_to_geotiff(netcdf_path, geotiff_path)
-            
-            if not success:
-                logger.warning("Failed to convert to GeoTIFF, falling back to vector format")
-                return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
-            
-            # Try to upload as raster
-            result = self._upload_raster_tileset(geotiff_path, tileset_id)
-            
-            # Clean up
-            if os.path.exists(geotiff_path):
-                os.remove(geotiff_path)
-            
-            if result['success']:
-                return result
-            else:
-                logger.warning(f"Raster upload failed: {result['error']}, falling back to vector format")
-                return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
-                
-        except ImportError:
-            logger.warning("Raster converter not available, using vector format")
-            return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
-        except Exception as e:
-            logger.error(f"Error in raster tileset creation: {str(e)}")
-            return self.process_netcdf_to_tileset(netcdf_path, tileset_id, {})
-    
-    def _upload_raster_tileset(self, geotiff_path: str, tileset_id: str) -> Dict[str, Any]:
-        """Try to upload raster tileset (may fail on free accounts)"""
-        try:
-            # Get upload credentials
-            credentials_url = f"{self.api_base}/uploads/v1/{self.username}?access_token={self.access_token}"
-            
-            response = requests.post(credentials_url, json={})
-            
-            if response.status_code != 200:
-                return {
-                    "success": False,
-                    "error": f"Failed to get upload credentials: {response.status_code}"
-                }
-            
-            credentials = response.json()
-            
-            # Upload to S3
-            with open(geotiff_path, 'rb') as f:
-                files = {'file': (os.path.basename(geotiff_path), f)}
-                upload_response = requests.post(credentials['url'], files=files)
-            
-            if upload_response.status_code not in [200, 201, 204]:
-                return {
-                    "success": False,
-                    "error": "Failed to upload to S3"
-                }
-            
-            # Create tileset
-            tileset_url = f"{self.api_base}/uploads/v1/{self.username}/{tileset_id}?access_token={self.access_token}"
-            
-            tileset_data = {
-                "url": credentials['url'],
-                "tileset": f"{self.username}.{tileset_id}",
-                "name": f"Wind data {tileset_id}"
-            }
-            
-            create_response = requests.post(tileset_url, json=tileset_data)
-            
-            if create_response.status_code in [200, 201, 202]:
-                return {
-                    "success": True,
-                    "tileset_id": f"{self.username}.{tileset_id}",
-                    "format": "raster-array"
-                }
-            else:
-                return {
-                    "success": False,
-                    "error": f"Failed to create tileset: {create_response.text}"
-                }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e)
-            }
-    
-    def process_netcdf_to_tileset(self, netcdf_path: str, tileset_id: str, recipe: Dict) -> Dict[str, Any]:
-        """Process NetCDF to vector tileset (reliable method)"""
+    def process_netcdf_to_tileset(self, netcdf_path: str, tileset_id: str, recipe: Dict = None) -> Dict[str, Any]:
+        """Process NetCDF to vector tileset with proper error handling"""
         try:
             # Step 1: Convert NetCDF to line-delimited GeoJSON
             logger.info("Converting NetCDF to GeoJSON...")
@@ -150,8 +54,11 @@ class MapboxTilesetManager:
             source_result = self.create_tileset_source(source_id, geojson_path)
             
             # Clean up GeoJSON file
-            if os.path.exists(geojson_path):
-                os.remove(geojson_path)
+            try:
+                if os.path.exists(geojson_path):
+                    os.remove(geojson_path)
+            except Exception as e:
+                logger.warning(f"Could not remove temp file: {e}")
             
             if not source_result["success"]:
                 return source_result
@@ -159,21 +66,17 @@ class MapboxTilesetManager:
             # Step 3: Create tileset with recipe
             tileset_id = self._sanitize_id(tileset_id)
             
-            recipe = {
-                "version": 1,
-                "layers": {
-                    "weather_data": {
-                        "source": f"mapbox://tileset-source/{self.username}/{source_id}",
-                        "minzoom": 0,
-                        "maxzoom": 10,
-                        "features": {
-                            "attributes": {
-                                "allowed_output": ["speed", "direction", "u", "v"]
-                            }
+            if not recipe:
+                recipe = {
+                    "version": 1,
+                    "layers": {
+                        "weather_data": {
+                            "source": f"mapbox://tileset-source/{self.username}/{source_id}",
+                            "minzoom": 0,
+                            "maxzoom": 10
                         }
                     }
                 }
-            }
             
             logger.info(f"Creating tileset: {tileset_id}")
             tileset_result = self.create_tileset(tileset_id, recipe)
@@ -188,11 +91,17 @@ class MapboxTilesetManager:
             if not publish_result["success"]:
                 return publish_result
             
+            # Save source layer info
+            source_layer = "weather_data"
+            
             return {
                 "success": True,
                 "tileset_id": f"{self.username}.{tileset_id}",
                 "job_id": publish_result.get("job_id"),
-                "format": "vector"
+                "format": "vector",
+                "source_layer": source_layer,
+                "recipe_id": tileset_result.get("recipe_id"),
+                "publish_job_id": publish_result.get("job_id")
             }
             
         except Exception as e:
@@ -204,49 +113,53 @@ class MapboxTilesetManager:
     def create_tileset_source(self, source_id: str, file_path: str) -> Dict[str, Any]:
         """Upload source data to Mapbox - FIXED VERSION"""
         try:
+            # First, delete any existing source with the same ID
+            delete_url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
+            delete_response = requests.delete(delete_url)
+            if delete_response.status_code == 204:
+                logger.info(f"Deleted existing source: {source_id}")
+            
+            # Upload new source
             url = f"{self.api_base}/tilesets/v1/sources/{self.username}/{source_id}?access_token={self.access_token}"
             
-            # Read file content as line-delimited JSON
-            features = []
-            with open(file_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        features.append(line)
+            # Read the entire file content
+            with open(file_path, 'rb') as f:
+                file_content = f.read()
             
-            if not features:
-                return {"success": False, "error": "No features found in GeoJSON file"}
-                
-            # Join features with newlines for NDJSON format
-            ndjson_content = '\n'.join(features)
-            
-            logger.info(f"Uploading source with {len(features)} features...")
-            
-            # Make request with proper content type and multipart form data
+            # The Mapbox API expects the file to be sent as multipart/form-data
             files = {
-                'file': (f'{source_id}.ndjson', ndjson_content.encode('utf-8'), 'application/x-ndjson')
+                'file': (f'{source_id}.json', file_content, 'application/x-ndjson')
             }
             
-            response = requests.put(url, files=files)
+            logger.info(f"Uploading source: {source_id} ({len(file_content)} bytes)")
+            
+            response = requests.post(url, files=files)
             
             logger.info(f"Source upload response: {response.status_code}")
+            if response.text:
+                logger.info(f"Response body: {response.text}")
             
             if response.status_code in [200, 201]:
                 logger.info(f"Successfully created tileset source: {source_id}")
                 return {"success": True, "source_id": f"{self.username}.{source_id}"}
             else:
-                error_msg = f"Failed to create source: {response.status_code} - {response.text}"
+                error_msg = f"Failed to create source: {response.status_code}"
+                if response.text:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('message', error_msg)
+                    except:
+                        error_msg += f" - {response.text}"
+                
                 logger.error(error_msg)
                 
                 # Provide helpful error messages
-                if response.status_code == 400 and "No file data" in response.text:
-                    error_msg = "Failed to upload source data. The file format may be incorrect."
-                elif response.status_code == 401:
-                    error_msg = "Authentication failed. Please check your Mapbox token has the required permissions (uploads:write, tilesets:write)"
+                if response.status_code == 401:
+                    error_msg = "Authentication failed. Check your Mapbox token permissions (needs uploads:write)"
                 elif response.status_code == 422:
-                    error_msg = "Invalid source data format. Ensure the GeoJSON is properly formatted."
+                    error_msg = "Invalid source data format. Check the GeoJSON structure"
                 elif response.status_code == 413:
-                    error_msg = "File too large. Try reducing the number of points in your data."
+                    error_msg = "File too large. Try reducing the number of data points"
                 
                 return {"success": False, "error": error_msg}
                 
@@ -259,16 +172,23 @@ class MapboxTilesetManager:
     def create_tileset(self, tileset_id: str, recipe: Dict, name: str = None) -> Dict[str, Any]:
         """Create a new tileset with recipe"""
         try:
+            # First, try to delete any existing tileset
+            delete_url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}?access_token={self.access_token}"
+            delete_response = requests.delete(delete_url)
+            if delete_response.status_code == 204:
+                logger.info(f"Deleted existing tileset: {tileset_id}")
+                # Wait a moment for deletion to process
+                time.sleep(2)
+            
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}?access_token={self.access_token}"
             
-            # Ensure we have a proper name
             if not name:
                 name = f"Weather data {tileset_id}"
             
             data = {
                 "recipe": recipe,
                 "name": name,
-                "description": "Weather visualization data",
+                "description": "Weather visualization data created from NetCDF",
                 "private": False
             }
             
@@ -276,19 +196,33 @@ class MapboxTilesetManager:
                 'Content-Type': 'application/json'
             }
             
-            response = requests.put(
+            response = requests.post(
                 url,
                 json=data,
                 headers=headers
             )
             
             logger.info(f"Create tileset response: {response.status_code}")
+            if response.text:
+                logger.info(f"Response body: {response.text}")
             
             if response.status_code in [200, 201]:
                 logger.info(f"Successfully created tileset: {tileset_id}")
-                return {"success": True, "tileset_id": f"{self.username}.{tileset_id}"}
+                result = response.json() if response.text else {}
+                return {
+                    "success": True, 
+                    "tileset_id": f"{self.username}.{tileset_id}",
+                    "recipe_id": result.get("id")
+                }
             else:
-                error_msg = f"Failed to create tileset: {response.status_code} - {response.text}"
+                error_msg = f"Failed to create tileset: {response.status_code}"
+                if response.text:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('message', error_msg)
+                    except:
+                        error_msg += f" - {response.text}"
+                        
                 logger.error(error_msg)
                 return {"success": False, "error": error_msg}
                 
@@ -301,23 +235,26 @@ class MapboxTilesetManager:
         try:
             url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}/publish?access_token={self.access_token}"
             
-            response = requests.post(
-                url,
-                headers={'Content-Type': 'application/json'}
-            )
+            response = requests.post(url)
             
             logger.info(f"Publish tileset response: {response.status_code}")
+            if response.text:
+                logger.info(f"Response body: {response.text}")
             
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"Successfully published tileset: {tileset_id}")
-                return {"success": True, "job_id": result.get("jobId")}
-            elif response.status_code == 201:
-                # Sometimes returns 201 for successful queue
-                logger.info(f"Tileset publish queued: {tileset_id}")
-                return {"success": True, "job_id": None}
+            if response.status_code in [200, 201, 202]:
+                result = response.json() if response.text else {}
+                job_id = result.get("jobId") or result.get("id")
+                logger.info(f"Successfully published tileset: {tileset_id}, job_id: {job_id}")
+                return {"success": True, "job_id": job_id}
             else:
-                error_msg = f"Failed to publish tileset: {response.status_code} - {response.text}"
+                error_msg = f"Failed to publish tileset: {response.status_code}"
+                if response.text:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('message', error_msg)
+                    except:
+                        error_msg += f" - {response.text}"
+                        
                 logger.error(error_msg)
                 return {"success": False, "error": error_msg}
                 
@@ -333,7 +270,7 @@ class MapboxTilesetManager:
             # Find coordinates
             lons, lats = self._get_coordinates(ds)
             
-            # Find wind components
+            # Find wind components or use first two variables
             u_var, v_var = self._find_wind_components(ds)
             
             if not u_var or not v_var:
@@ -342,13 +279,11 @@ class MapboxTilesetManager:
                 if len(var_list) >= 2:
                     u_var = var_list[0]
                     v_var = var_list[1]
+                elif len(var_list) == 1:
+                    u_var = var_list[0]
+                    v_var = var_list[0]
                 else:
-                    # If only one variable, create a dummy second one
-                    if len(var_list) == 1:
-                        u_var = var_list[0]
-                        v_var = var_list[0]
-                    else:
-                        raise ValueError("Need at least 1 variable for visualization")
+                    raise ValueError("Need at least 1 variable for visualization")
             
             logger.info(f"Using variables: U={u_var}, V={v_var}")
             
@@ -361,18 +296,19 @@ class MapboxTilesetManager:
                 u_data = u_data.isel(time=0)
                 v_data = v_data.isel(time=0)
             
-            # Create temporary file
-            temp_path = tempfile.mktemp(suffix='.ndjson')
+            # Create temporary file for NDJSON
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.json')
+            os.close(temp_fd)  # Close the file descriptor
             
             # Write features
             feature_count = 0
-            with open(temp_path, 'w') as f:
-                # Sample data to reduce size (max ~10000 points)
-                max_points = 10000
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                # Sample data to reduce size (max ~5000 points for better performance)
+                max_points = 5000
                 total_points = len(lats) * len(lons)
                 
                 if total_points > max_points:
-                    # Calculate step size to get approximately max_points
+                    # Calculate step size
                     step = int(np.sqrt(total_points / max_points))
                     lat_step = max(1, step)
                     lon_step = max(1, step)
@@ -387,13 +323,8 @@ class MapboxTilesetManager:
                     for j in range(0, len(lons), lon_step):
                         try:
                             # Get values
-                            if u_var == v_var:
-                                # Single variable case
-                                u_val = float(u_data.values[i, j])
-                                v_val = 0.0
-                            else:
-                                u_val = float(u_data.values[i, j])
-                                v_val = float(v_data.values[i, j])
+                            u_val = float(u_data.values[i, j])
+                            v_val = float(v_data.values[i, j])
                             
                             # Skip NaN values
                             if np.isnan(u_val):
@@ -402,8 +333,8 @@ class MapboxTilesetManager:
                                 v_val = 0.0
                             
                             # Calculate derived values
-                            speed = np.sqrt(u_val**2 + v_val**2)
-                            direction = np.arctan2(v_val, u_val) * 180 / np.pi
+                            speed = float(np.sqrt(u_val**2 + v_val**2))
+                            direction = float(np.arctan2(v_val, u_val) * 180 / np.pi)
                             
                             # Create feature
                             feature = {
@@ -415,24 +346,24 @@ class MapboxTilesetManager:
                                 "properties": {
                                     "u": round(u_val, 3),
                                     "v": round(v_val, 3),
-                                    "speed": round(float(speed), 3),
-                                    "direction": round(float(direction), 1)
+                                    "speed": round(speed, 3),
+                                    "direction": round(direction, 1)
                                 }
                             }
                             
                             # Write as line-delimited JSON
-                            f.write(json.dumps(feature, separators=(',', ':')) + '\n')
+                            json_line = json.dumps(feature, separators=(',', ':'))
+                            f.write(json_line + '\n')
                             feature_count += 1
                             
                         except Exception as e:
-                            # Skip problematic points
+                            logger.warning(f"Skipping point ({i},{j}): {e}")
                             continue
             
             ds.close()
             
             logger.info(f"Created GeoJSON with {feature_count} features at {temp_path}")
             
-            # Verify file is not empty
             if feature_count == 0:
                 logger.error("No valid features found in NetCDF")
                 if os.path.exists(temp_path):
@@ -455,11 +386,9 @@ class MapboxTilesetManager:
         u_var = None
         v_var = None
         
-        # Check all variables
         for var in ds.data_vars:
             var_lower = var.lower()
             
-            # Look for U component
             if not u_var:
                 for pattern in u_patterns:
                     if pattern in var_lower or var_lower == pattern:
@@ -467,7 +396,6 @@ class MapboxTilesetManager:
                         logger.info(f"Found U component: {var}")
                         break
             
-            # Look for V component
             if not v_var:
                 for pattern in v_patterns:
                     if pattern in var_lower or var_lower == pattern:
@@ -475,7 +403,6 @@ class MapboxTilesetManager:
                         logger.info(f"Found V component: {var}")
                         break
             
-            # Stop if both found
             if u_var and v_var:
                 break
         
@@ -506,46 +433,30 @@ class MapboxTilesetManager:
         if lons is None:
             for name in lon_names:
                 if name in ds.dims:
-                    # Create coordinate array from dimension
                     lons = np.arange(ds.dims[name])
-                    logger.info(f"Created longitude from dimension: {name}")
+                    logger.warning(f"Created synthetic longitude from dimension: {name}")
                     break
         
         if lats is None:
             for name in lat_names:
                 if name in ds.dims:
-                    # Create coordinate array from dimension
                     lats = np.arange(ds.dims[name])
-                    logger.info(f"Created latitude from dimension: {name}")
-                    break
-        
-        # Check data variables as last resort
-        if lons is None:
-            for name in lon_names:
-                if name in ds.data_vars:
-                    lons = ds[name].values
-                    logger.info(f"Found longitude in data_vars: {name}")
-                    break
-        
-        if lats is None:
-            for name in lat_names:
-                if name in ds.data_vars:
-                    lats = ds[name].values
-                    logger.info(f"Found latitude in data_vars: {name}")
+                    logger.warning(f"Created synthetic latitude from dimension: {name}")
                     break
         
         if lons is None or lats is None:
-            # Last resort: create synthetic coordinates
-            logger.warning("Could not find coordinates, creating synthetic grid")
-            if lons is None:
-                lons = np.linspace(-180, 180, 100)
-            if lats is None:
-                lats = np.linspace(-90, 90, 50)
+            raise ValueError("Could not find longitude/latitude coordinates")
         
+        # Ensure proper shape
+        if lons.ndim > 1:
+            lons = lons[0, :]
+        if lats.ndim > 1:
+            lats = lats[:, 0]
+            
         return lons, lats
     
     def _sanitize_id(self, id_str: str) -> str:
-        """Sanitize ID to meet Mapbox requirements (32 chars, alphanumeric + dash/underscore)"""
+        """Sanitize ID to meet Mapbox requirements"""
         # Convert to lowercase
         id_str = id_str.lower()
         # Replace invalid characters with underscore
@@ -563,12 +474,18 @@ class MapboxTilesetManager:
     def get_tileset_status(self, tileset_id: str) -> Dict[str, Any]:
         """Get tileset information and status"""
         try:
-            url = f"{self.api_base}/tilesets/v1/{self.username}.{tileset_id}?access_token={self.access_token}"
+            # Try with full tileset ID first
+            if '.' not in tileset_id:
+                tileset_id = f"{self.username}.{tileset_id}"
+                
+            url = f"{self.api_base}/tilesets/v1/{tileset_id}?access_token={self.access_token}"
             
             response = requests.get(url)
             
             if response.status_code == 200:
                 return response.json()
+            elif response.status_code == 404:
+                return {"error": "Tileset not found"}
             else:
                 logger.error(f"Failed to get tileset status: {response.status_code}")
                 return {"error": response.text}
@@ -587,7 +504,7 @@ class MapboxTilesetManager:
             if response.status_code == 200:
                 return response.json()
             elif response.status_code == 401:
-                logger.error("Authentication failed when listing tilesets - check your token")
+                logger.error("Authentication failed - check your token")
                 return []
             else:
                 logger.error(f"Failed to list tilesets: {response.status_code}")

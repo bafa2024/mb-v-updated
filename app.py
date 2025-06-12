@@ -264,7 +264,9 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
                              tileset_name: Optional[str], visualization_type: str) -> Dict:
     """Process NetCDF file and extract metadata"""
     try:
-        ds = xr.open_dataset(str(file_path))
+        # Convert Path to string for xarray
+        file_path_str = str(file_path)
+        ds = xr.open_dataset(file_path_str)
         
         # Log file info
         logger.info(f"Opened NetCDF file: {file_path}")
@@ -294,7 +296,6 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
                 "u": wind_components["u"],
                 "v": wind_components["v"]
             })
-            # Remove wind components from scalar vars
             scalar_vars = [v for v in ds.data_vars if v not in [wind_components["u"], wind_components["v"]]]
         else:
             logger.warning("No wind components found in NetCDF file")
@@ -331,11 +332,11 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         # Generate tileset ID
         if not tileset_name:
             filename = Path(file_path).stem.split('_', 1)[-1]  # Remove job_id prefix
-            tileset_name = ''.join(c for c in filename if c.isalnum() or c in '-_')
+            tileset_name = ''.join(c for c in filename if c.isalnum() or c in '-_')[:20]
             if not tileset_name:
                 tileset_name = "weather_data"
         
-        # Create tileset ID
+        # Sanitize tileset name
         tileset_name = tileset_name.lower()
         tileset_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in tileset_name)
         tileset_name = '_'.join(part for part in tileset_name.split('_') if part)
@@ -452,7 +453,7 @@ def get_dataset_bounds(ds):
 
 async def create_mapbox_tileset_background(file_path: Path, job_id: str, 
                                           tileset_id: str, visualization_type: str):
-    """Background task to create Mapbox tileset with proper format support"""
+    """Background task to create Mapbox tileset with proper error handling"""
     try:
         if not Config.MAPBOX_TOKEN:
             logger.error("Mapbox token not configured")
@@ -461,43 +462,32 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                 active_visualizations[job_id]['error'] = 'Mapbox token not configured'
             return
         
+        # Convert Path to string
+        file_path_str = str(file_path)
+        
         # Verify file exists
-        if not file_path.exists():
-            logger.error(f"NetCDF file not found: {file_path}")
+        if not os.path.exists(file_path_str):
+            logger.error(f"NetCDF file not found: {file_path_str}")
             if job_id in active_visualizations:
                 active_visualizations[job_id]['status'] = 'failed'
                 active_visualizations[job_id]['error'] = 'Input file not found'
             return
         
-        # Create tileset based on visualization type
-        if visualization_type == 'raster-array':
-            logger.info(f"Creating MTS raster tileset for animation...")
-            manager = MTSRasterManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-            result = await manager.create_raster_tileset(str(file_path), tileset_id)
-            
-            # Check if we need to fall back to vector
-            if not result['success'] and 'Pro account' in result.get('error', ''):
-                logger.info("Falling back to vector format due to account limitations")
-                visualization_type = 'vector'
-                manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-                result = manager.process_netcdf_to_tileset(str(file_path), tileset_id, {})
-                if result['success']:
-                    # Update the error message to be more informative
-                    if job_id in active_visualizations:
-                        active_visualizations[job_id]['warning'] = 'Raster-array requires Pro account. Created vector visualization instead.'
-        else:
-            # Use standard vector format
-            logger.info(f"Creating vector tileset...")
-            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-            result = manager.process_netcdf_to_tileset(str(file_path), tileset_id, {})
+        # For now, always use vector format (raster-array requires Pro account)
+        logger.info(f"Creating vector tileset from {file_path_str}")
+        
+        manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        
+        # Process NetCDF to tileset
+        result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
         
         if result['success']:
             # Update visualization info
             if job_id in active_visualizations:
                 active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
                 active_visualizations[job_id]['status'] = 'completed'
-                active_visualizations[job_id]['format'] = result.get('format', visualization_type)
-                active_visualizations[job_id]['source_layer'] = result.get('source_layer')
+                active_visualizations[job_id]['format'] = result.get('format', 'vector')
+                active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
                 active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
                 active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
                 
@@ -507,21 +497,20 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     "tileset_id": tileset_id,
                     "mapbox_tileset": result['tileset_id'],
                     "created": datetime.now().isoformat(),
-                    "format": result.get('format', visualization_type),
+                    "format": result.get('format', 'vector'),
                     "source_layer": result.get('source_layer', 'weather_data'),
                     "recipe_id": result.get('recipe_id'),
-                    "publish_job_id": result.get('publish_job_id')
+                    "publish_job_id": result.get('publish_job_id'),
+                    "scalar_vars": active_visualizations[job_id].get("scalar_vars", []),
+                    "vector_pairs": active_visualizations[job_id].get("vector_pairs", [])
                 }
                 
-                # Include metadata from active_visualizations
-                if job_id in active_visualizations:
-                    recipe_data["scalar_vars"] = active_visualizations[job_id].get("scalar_vars", [])
-                    recipe_data["vector_pairs"] = active_visualizations[job_id].get("vector_pairs", [])
-                
-                with open(str(recipe_path), 'w') as f:
-                    json.dump(recipe_data, f, indent=2)
-                
-                logger.info(f"Saved recipe info to {recipe_path}")
+                try:
+                    with open(str(recipe_path), 'w') as f:
+                        json.dump(recipe_data, f, indent=2)
+                    logger.info(f"Saved recipe info to {recipe_path}")
+                except Exception as e:
+                    logger.error(f"Failed to save recipe: {e}")
                         
         else:
             error_msg = result.get('error', 'Unknown error')
@@ -631,19 +620,6 @@ async def load_tileset(tileset_id: str = Form(...)):
                     scalar_vars = recipe_data.get('scalar_vars', [])
                     vector_pairs = recipe_data.get('vector_pairs', [])
                     
-                    # For raster-array, provide particle configuration
-                    if format_type == 'raster-array':
-                        layer_config = {
-                            "particle_config": {
-                                "speed_factor": 0.4,
-                                "fade_opacity": 0.9,
-                                "reset_rate": 0.4,
-                                "count": 4000,
-                                "max_speed": 40
-                            },
-                            "color_ramp": "wind"
-                        }
-                    
                 logger.info(f"Found recipe for {tileset_name}, format: {format_type}")
             except Exception as e:
                 logger.error(f"Error reading recipe: {e}")
@@ -654,11 +630,8 @@ async def load_tileset(tileset_id: str = Form(...)):
             tileset_info = manager.get_tileset_status(tileset_name)
             
             if 'error' not in tileset_info:
-                # Tileset exists, check its type from metadata
-                if 'vector_layers' in tileset_info:
-                    format_type = 'vector'
-                elif tileset_info.get('type') == 'raster':
-                    format_type = 'raster-array'
+                # Tileset exists
+                logger.info(f"Tileset {tileset_name} exists on Mapbox")
         
         return JSONResponse({
             "success": True,
@@ -669,8 +642,7 @@ async def load_tileset(tileset_id: str = Form(...)):
                 "source_layer": source_layer,
                 "visualization_type": format_type,
                 "scalar_vars": scalar_vars,
-                "vector_pairs": vector_pairs,
-                **layer_config
+                "vector_pairs": vector_pairs
             }
         })
         
@@ -756,8 +728,6 @@ async def startup_event():
     logger.info(f"Mapbox Username: {Config.MAPBOX_USERNAME}")
     logger.info(f"Mapbox Token Set: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
     logger.info(f"Mapbox Public Token Set: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
-    
-    logger.info("MTS Raster support enabled - works with free tier!")
     
     # Run cleanup
     await cleanup_old_files()
