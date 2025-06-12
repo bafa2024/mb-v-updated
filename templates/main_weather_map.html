@@ -324,16 +324,6 @@
             font-size: 13px;
         }
         
-        /* Wind Canvas for client-side animation */
-        #windCanvas {
-            position: absolute;
-            top: 0;
-            left: 0;
-            pointer-events: none;
-            z-index: 100;
-            display: none;
-        }
-        
         /* Radio buttons for visualization type */
         .radio-group {
             margin: 10px 0;
@@ -349,11 +339,20 @@
         .radio-group input[type="radio"] {
             margin-right: 8px;
         }
+        
+        .info-note {
+            font-size: 12px;
+            color: #9ca3af;
+            margin-top: 5px;
+            padding: 8px;
+            background: rgba(59, 130, 246, 0.1);
+            border-radius: 4px;
+            border-left: 3px solid #3b82f6;
+        }
     </style>
 </head>
 <body>
     <div id="map"></div>
-    <canvas id="windCanvas"></canvas>
     
     <!-- Control Panel -->
     <div class="control-panel">
@@ -366,7 +365,8 @@
                 {% for tileset in available_tilesets %}
                 <option value="{{ tileset.id }}" 
                         data-type="{{ tileset.type }}"
-                        data-format="{{ tileset.format }}">
+                        data-format="{{ tileset.format }}"
+                        data-source-layer="{{ tileset.source_layer }}">
                     {{ tileset.name }}
                 </option>
                 {% endfor %}
@@ -385,9 +385,11 @@
             <div id="vizTypeSelection" class="radio-group" style="display: none;">
                 <label><input type="radio" name="vizType" value="vector" checked> Static Visualization (Vector)</label>
                 <label><input type="radio" name="vizType" value="raster-array"> Animated Visualization (Raster-Array)</label>
-                <small style="color: #9ca3af; display: block; margin-top: 5px;">
-                    Note: Animated visualization requires Mapbox Pro account
-                </small>
+                <div class="info-note">
+                    ✓ Both visualization types work with free Mapbox accounts!<br>
+                    ✓ Raster-array provides smooth particle animation<br>
+                    ✓ Processing may take 1-2 minutes for large files
+                </div>
             </div>
             
             <button id="uploadBtn" class="btn btn-success" style="display: none;">
@@ -453,20 +455,12 @@
             <button class="btn btn-secondary" id="resetViewBtn">
                 🔄 Reset View
             </button>
-            
-            <button class="btn btn-secondary" id="toggleWindBtn" style="display: none;">
-                👁️ Toggle Wind
-            </button>
         </div>
         
         <!-- Debug Section -->
         <div class="control-section" id="debugSection">
             <button class="btn btn-secondary" id="debugBtn" style="display: none;">
                 🐛 Debug Data
-            </button>
-            
-            <button class="btn btn-secondary" id="forceAnimationBtn" style="display: none;">
-                🌀 Force Animation
             </button>
             
             <button class="btn btn-danger" id="clearBtn">
@@ -511,11 +505,7 @@
         let currentTilesetId = null;
         let currentVisualizationType = null;
         let currentFormat = null;
-        let windAnimationFrame = null;
-        let windParticles = [];
-        let windField = null;
-        let canvas = document.getElementById('windCanvas');
-        let ctx = canvas.getContext('2d');
+        let checkStatusInterval = null;
         
         // Initialize map
         map.on('style.load', () => {
@@ -585,15 +575,20 @@
                 'interpolate',
                 ['linear'],
                 ['raster-particle-speed'],
-                0, 'rgba(59,130,246,255)',      // Blue
-                5, 'rgba(16,185,129,255)',      // Green
-                10, 'rgba(52,211,153,255)',     // Light green
-                15, 'rgba(251,191,36,255)',     // Yellow
-                20, 'rgba(245,158,11,255)',     // Orange
-                25, 'rgba(239,68,68,255)',      // Red
-                30, 'rgba(220,38,38,255)',      // Dark red
-                35, 'rgba(185,28,28,255)',      // Darker red
-                40, 'rgba(153,27,27,255)'       // Darkest red
+                1.5, 'rgba(134, 163, 171, 1.0)',
+                2.5, 'rgba(126, 152, 188, 1.0)',
+                4.12, 'rgba(110, 143, 208, 1.0)',
+                5.75, 'rgba(15, 147, 167, 1.0)',
+                6.0, 'rgba(80, 83, 208, 1.0)',
+                8.0, 'rgba(57, 163, 57, 1.0)',
+                10.0, 'rgba(156, 77, 204, 1.0)',
+                12.0, 'rgba(194, 134, 62, 1.0)',
+                14.0, 'rgba(200, 66, 13, 1.0)',
+                17.0, 'rgba(210, 40, 40, 1.0)',
+                20.0, 'rgba(215, 0, 0, 1.0)',
+                25.0, 'rgba(175, 80, 136, 1.0)',
+                30.0, 'rgba(117, 74, 147, 1.0)',
+                40.0, 'rgba(68, 105, 141, 1.0)'
             ];
         }
         
@@ -618,11 +613,6 @@
             document.getElementById('resetViewBtn').addEventListener('click', resetView);
             document.getElementById('clearBtn').addEventListener('click', clearWindVisualization);
             document.getElementById('debugBtn').addEventListener('click', debugData);
-            document.getElementById('forceAnimationBtn').addEventListener('click', forceAnimation);
-            
-            // Resize canvas
-            window.addEventListener('resize', resizeCanvas);
-            resizeCanvas();
         }
         
         // Handle file selection
@@ -733,9 +723,14 @@
         // Check processing status
         async function checkProcessingStatus(jobId, vizType) {
             let checkCount = 0;
-            const maxChecks = 60; // 3 minutes max
+            const maxChecks = 120; // 10 minutes max (5 second intervals)
             
-            const checkInterval = setInterval(async () => {
+            // Clear any existing interval
+            if (checkStatusInterval) {
+                clearInterval(checkStatusInterval);
+            }
+            
+            checkStatusInterval = setInterval(async () => {
                 try {
                     checkCount++;
                     
@@ -743,31 +738,21 @@
                     const status = await response.json();
                     
                     if (status.status === 'completed') {
-                        clearInterval(checkInterval);
-                        updateProgress(100, 'Processing complete!');
+                        clearInterval(checkStatusInterval);
+                        updateProgress(90, 'Tileset created! Waiting for publishing...');
                         
-                        // Check if we have an upload_id for raster-array
-                        if (status.format === 'raster-array' && status.upload_id) {
-                            // Monitor upload progress
-                            monitorUploadProgress(status.upload_id, status);
+                        // For raster tilesets, check if publishing is complete
+                        if (status.format === 'raster-array' && status.publish_job_id) {
+                            checkPublishingStatus(status);
                         } else {
-                            // Standard completion
                             completeUpload(status);
                         }
                         
                     } else if (status.status === 'failed') {
-                        clearInterval(checkInterval);
+                        clearInterval(checkStatusInterval);
                         updateProgress(0, 'Processing failed');
                         
                         let errorMsg = status.error || 'Unknown error';
-                        
-                        // Provide helpful error messages
-                        if (errorMsg.includes('422') || errorMsg.includes('Pro account')) {
-                            errorMsg = 'Raster-array format requires a Mapbox Pro account. Please select Vector format instead.';
-                        } else if (errorMsg.includes('401')) {
-                            errorMsg = 'Authentication failed. Please check your Mapbox token permissions.';
-                        }
-                        
                         showNotification('Processing failed: ' + errorMsg, 'error');
                         
                         // Reset UI
@@ -779,53 +764,50 @@
                         
                     } else {
                         // Still processing
-                        let progress = 75;
-                        if (checkCount > 10) progress = 85;
-                        if (checkCount > 20) progress = 95;
+                        let progress = 60;
+                        if (checkCount > 10) progress = 70;
+                        if (checkCount > 20) progress = 80;
+                        if (checkCount > 30) progress = 85;
                         
                         updateProgress(progress, 'Creating Mapbox tileset...');
                         
                         if (checkCount >= maxChecks) {
-                            clearInterval(checkInterval);
-                            showNotification('Processing is taking longer than expected. Check back later.', 'warning');
+                            clearInterval(checkStatusInterval);
+                            showNotification('Processing is taking longer than expected. The tileset may still be processing in the background.', 'warning');
                             completeUpload(status);
                         }
                     }
                 } catch (error) {
-                    clearInterval(checkInterval);
+                    clearInterval(checkStatusInterval);
                     showNotification('Status check failed', 'error');
                     document.getElementById('progressContainer').style.display = 'none';
                     document.getElementById('vizTypeSelection').style.display = 'none';
                 }
-            }, 3000);
+            }, 5000); // Check every 5 seconds
         }
         
-        // Monitor Mapbox upload progress for raster-array
-        async function monitorUploadProgress(uploadId, statusInfo) {
-            updateProgress(95, 'Finalizing raster upload...');
+        // Check publishing status for raster tilesets
+        async function checkPublishingStatus(statusInfo) {
+            const username = '{{ mapbox_username }}';
+            const tilesetId = statusInfo.tileset_id;
             
-            let uploadCheckCount = 0;
-            const uploadCheckInterval = setInterval(async () => {
+            let publishCheckCount = 0;
+            const publishCheckInterval = setInterval(async () => {
                 try {
-                    uploadCheckCount++;
+                    publishCheckCount++;
                     
-                    const response = await fetch(`/api/upload-status/${uploadId}`);
-                    const uploadStatus = await response.json();
+                    const response = await fetch(`/api/tileset-status/${username}/${tilesetId}`);
+                    const publishStatus = await response.json();
                     
-                    if (uploadStatus.complete || uploadCheckCount > 20) {
-                        clearInterval(uploadCheckInterval);
-                        
-                        if (uploadStatus.error) {
-                            showNotification('Upload error: ' + uploadStatus.error, 'error');
-                        } else {
-                            completeUpload(statusInfo);
-                        }
-                    } else if (uploadStatus.progress !== undefined) {
-                        updateProgress(95 + (uploadStatus.progress * 0.05), `Uploading: ${uploadStatus.progress}%`);
+                    if (publishStatus.complete || publishCheckCount > 20) {
+                        clearInterval(publishCheckInterval);
+                        completeUpload(statusInfo);
+                    } else {
+                        updateProgress(95, 'Publishing tileset...');
                     }
                     
                 } catch (error) {
-                    clearInterval(uploadCheckInterval);
+                    clearInterval(publishCheckInterval);
                     // Continue anyway
                     completeUpload(statusInfo);
                 }
@@ -854,6 +836,7 @@
                 option.value = tilesetId;
                 option.setAttribute('data-format', status.format || 'vector');
                 option.setAttribute('data-type', 'user');
+                option.setAttribute('data-source-layer', status.source_layer || '10winds');
                 option.textContent = `Uploaded: ${status.tileset_id}`;
                 selector.appendChild(option);
             }
@@ -864,7 +847,7 @@
             // Wait a moment for tileset to be fully available
             setTimeout(() => {
                 selector.dispatchEvent(new Event('change'));
-            }, 2000);
+            }, 3000);
             
             setTimeout(() => {
                 document.getElementById('progressContainer').style.display = 'none';
@@ -884,6 +867,7 @@
             const tilesetId = event.target.value;
             const selectedOption = event.target.selectedOptions[0];
             const format = selectedOption.getAttribute('data-format') || 'vector';
+            const sourceLayer = selectedOption.getAttribute('data-source-layer') || '10winds';
             
             // Clear existing visualization
             clearWindVisualization();
@@ -897,7 +881,7 @@
                     loadDefaultWindVisualization();
                 } else {
                     // Load custom tileset
-                    await loadCustomTileset(tilesetId, format);
+                    await loadCustomTileset(tilesetId, format, sourceLayer);
                 }
             } catch (error) {
                 console.error('Error loading tileset:', error);
@@ -908,7 +892,7 @@
         }
         
         // Load custom tileset
-        async function loadCustomTileset(tilesetId, format) {
+        async function loadCustomTileset(tilesetId, format, sourceLayer) {
             const formData = new FormData();
             formData.append('tileset_id', tilesetId);
             
@@ -929,10 +913,12 @@
             }
             
             const actualFormat = tilesetInfo.format || format;
+            const actualSourceLayer = tilesetInfo.config?.source_layer || sourceLayer || '10winds';
             
             if (actualFormat === 'raster-array') {
                 // Load as raster-array for wind animation
                 console.log('Loading raster-array tileset for particle animation');
+                console.log('Source layer:', actualSourceLayer);
                 
                 // Add the raster-array source
                 map.addSource('custom-raster-source', {
@@ -950,12 +936,12 @@
                     max_speed: 40
                 };
                 
-                // Add raster-particle layer
+                // Add raster-particle layer with proper source-layer
                 map.addLayer({
                     'id': 'wind-layer',
                     'type': 'raster-particle',
                     'source': 'custom-raster-source',
-                    'source-layer': '0',  // Raster arrays typically use numeric source layers
+                    'source-layer': actualSourceLayer,  // Use the actual source layer from recipe
                     'paint': {
                         'raster-particle-speed-factor': particleConfig.speed_factor,
                         'raster-particle-fade-opacity-factor': particleConfig.fade_opacity,
@@ -975,7 +961,6 @@
                 document.getElementById('visualizationInfo').style.display = 'block';
                 document.getElementById('vizType').textContent = 'Wind Particle Animation (Raster-Array)';
                 document.getElementById('dataFormat').textContent = 'Raster-Array';
-                document.getElementById('forceAnimationBtn').style.display = 'none';
                 
                 showNotification('Wind animation loaded successfully!', 'success');
                 
@@ -1208,14 +1193,6 @@
         // Enable/disable wind controls
         function enableWindControls(enabled) {
             document.getElementById('windControls').style.display = enabled ? 'block' : 'none';
-            if (!enabled) {
-                // Stop client-side animation if running
-                if (windAnimationFrame) {
-                    cancelAnimationFrame(windAnimationFrame);
-                    windAnimationFrame = null;
-                }
-                canvas.style.display = 'none';
-            }
         }
         
         // Update visualization info
@@ -1232,6 +1209,12 @@
         
         // Clear wind visualization
         function clearWindVisualization() {
+            // Clear any status check interval
+            if (checkStatusInterval) {
+                clearInterval(checkStatusInterval);
+                checkStatusInterval = null;
+            }
+            
             // Remove layers
             ['wind-layer', 'wind-heatmap', 'wind-points', 'wind-arrows'].forEach(layerId => {
                 if (map.getLayer(layerId)) {
@@ -1246,26 +1229,13 @@
                 }
             });
             
-            // Stop animation
-            if (windAnimationFrame) {
-                cancelAnimationFrame(windAnimationFrame);
-                windAnimationFrame = null;
-            }
-            
-            // Clear canvas
-            canvas.style.display = 'none';
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            
             // Reset UI
             document.getElementById('visualizationInfo').style.display = 'none';
             document.getElementById('windControls').style.display = 'none';
             document.getElementById('debugBtn').style.display = 'none';
-            document.getElementById('forceAnimationBtn').style.display = 'none';
             
             currentTilesetId = null;
             currentVisualizationType = null;
-            windField = null;
-            windParticles = [];
             
             showNotification('Visualization cleared', 'info');
         }
@@ -1301,11 +1271,6 @@
             }
         }
         
-        // Force animation
-        function forceAnimation() {
-            showNotification('Client-side animation not implemented in this version', 'info');
-        }
-        
         // Update progress
         function updateProgress(percent, text) {
             document.getElementById('progressFill').style.width = percent + '%';
@@ -1323,15 +1288,6 @@
             setTimeout(() => {
                 notification.remove();
             }, 5000);
-        }
-        
-        // Resize canvas
-        function resizeCanvas() {
-            const rect = map.getCanvas().getBoundingClientRect();
-            canvas.width = rect.width;
-            canvas.height = rect.height;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
         }
     </script>
 </body>
