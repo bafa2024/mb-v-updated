@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import xarray as xr
 import numpy as np
 import os
+import sys
 import json
 import tempfile
 import traceback
@@ -18,6 +19,12 @@ import logging
 import asyncio
 from pydantic import BaseModel
 from dotenv import load_dotenv
+
+# Fix for Windows path issues
+if sys.platform == "win32":
+    import pathlib
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.WindowsPath
 
 # Load environment variables
 load_dotenv()
@@ -47,11 +54,12 @@ app.add_middleware(
 
 # Configuration
 class Config:
-    UPLOAD_DIR = Path("uploads")
-    PROCESSED_DIR = Path("processed")
-    RECIPE_DIR = Path("recipes")
-    STATIC_DIR = Path("static")
-    TEMPLATES_DIR = Path("templates")
+    BASE_DIR = Path(__file__).parent.absolute()
+    UPLOAD_DIR = BASE_DIR / "uploads"
+    PROCESSED_DIR = BASE_DIR / "processed"
+    RECIPE_DIR = BASE_DIR / "recipes"
+    STATIC_DIR = BASE_DIR / "static"
+    TEMPLATES_DIR = BASE_DIR / "templates"
     MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "500")) * 1024 * 1024  # MB to bytes
     
     # Load Mapbox credentials
@@ -66,13 +74,20 @@ class Config:
 # Create directories
 for dir_path in [Config.UPLOAD_DIR, Config.PROCESSED_DIR, Config.RECIPE_DIR, 
                  Config.STATIC_DIR, Config.TEMPLATES_DIR]:
-    dir_path.mkdir(exist_ok=True)
+    dir_path.mkdir(parents=True, exist_ok=True)
 
-# Mount static files
-app.mount("/static", StaticFiles(directory=str(Config.STATIC_DIR)), name="static")
+# Mount static files - fix path
+if Config.STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(Config.STATIC_DIR)), name="static")
+else:
+    logger.warning(f"Static directory not found: {Config.STATIC_DIR}")
+
 templates = Jinja2Templates(directory=str(Config.TEMPLATES_DIR))
 
 # Log configuration
+logger.info(f"Base directory: {Config.BASE_DIR}")
+logger.info(f"Static directory: {Config.STATIC_DIR}")
+logger.info(f"Templates directory: {Config.TEMPLATES_DIR}")
 logger.info(f"Mapbox Username: {Config.MAPBOX_USERNAME}")
 logger.info(f"Mapbox Token configured: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
 logger.info(f"Mapbox Public Token configured: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
@@ -192,13 +207,20 @@ async def upload_netcdf(
     if not safe_filename.endswith('.nc'):
         safe_filename = safe_filename.rsplit('.', 1)[0] + '.nc'
     
-    # Save uploaded file
+    # Save uploaded file - use Path properly
     file_path = Config.UPLOAD_DIR / f"{job_id}_{safe_filename}"
+    
+    # Ensure upload directory exists
+    Config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     
     logger.info(f"Saving uploaded file: {file_path}")
     
-    async with aiofiles.open(file_path, 'wb') as f:
-        await f.write(content)
+    try:
+        async with aiofiles.open(str(file_path), 'wb') as f:
+            await f.write(content)
+    except Exception as e:
+        logger.error(f"Failed to save file: {e}")
+        raise HTTPException(500, "Failed to save uploaded file")
     
     # Process file
     try:
@@ -242,7 +264,7 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
                              tileset_name: Optional[str], visualization_type: str) -> Dict:
     """Process NetCDF file and extract metadata"""
     try:
-        ds = xr.open_dataset(file_path)
+        ds = xr.open_dataset(str(file_path))
         
         # Log file info
         logger.info(f"Opened NetCDF file: {file_path}")
@@ -452,6 +474,17 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
             logger.info(f"Creating MTS raster tileset for animation...")
             manager = MTSRasterManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             result = await manager.create_raster_tileset(str(file_path), tileset_id)
+            
+            # Check if we need to fall back to vector
+            if not result['success'] and 'Pro account' in result.get('error', ''):
+                logger.info("Falling back to vector format due to account limitations")
+                visualization_type = 'vector'
+                manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+                result = manager.process_netcdf_to_tileset(str(file_path), tileset_id, {})
+                if result['success']:
+                    # Update the error message to be more informative
+                    if job_id in active_visualizations:
+                        active_visualizations[job_id]['warning'] = 'Raster-array requires Pro account. Created vector visualization instead.'
         else:
             # Use standard vector format
             logger.info(f"Creating vector tileset...")
@@ -485,7 +518,7 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     recipe_data["scalar_vars"] = active_visualizations[job_id].get("scalar_vars", [])
                     recipe_data["vector_pairs"] = active_visualizations[job_id].get("vector_pairs", [])
                 
-                with open(recipe_path, 'w') as f:
+                with open(str(recipe_path), 'w') as f:
                     json.dump(recipe_data, f, indent=2)
                 
                 logger.info(f"Saved recipe info to {recipe_path}")
@@ -521,6 +554,7 @@ async def get_visualization_status(job_id: str):
         "tileset_id": viz_info.get('tileset_id'),
         "mapbox_tileset": viz_info.get('mapbox_tileset'),
         "error": viz_info.get('error'),
+        "warning": viz_info.get('warning'),
         "metadata": viz_info.get('metadata'),
         "format": viz_info.get('format', 'vector'),
         "wind_components": viz_info.get('wind_components'),

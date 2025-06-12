@@ -2,7 +2,7 @@
 """
 Mapbox Tiling Service (MTS) Raster Manager
 Handles creation of raster-array tilesets using MTS for particle animation
-Works with free tier Mapbox accounts!
+Works with free tier Mapbox accounts! (with proper error handling)
 """
 
 import os
@@ -36,12 +36,35 @@ class MTSRasterManager:
         logger.info(f"Creating MTS raster tileset from {netcdf_path}")
         
         try:
+            # First check if raster uploads are supported (Pro account check)
+            credentials_test_url = f"{self.api_base}/uploads/v1/{self.username}/credentials?access_token={self.access_token}"
+            test_response = requests.post(credentials_test_url)
+            
+            if test_response.status_code == 422:
+                logger.warning("Raster uploads not supported on free tier")
+                return {
+                    'success': False,
+                    'error': 'Raster-array format requires a Mapbox Pro account. Please use Vector format instead.',
+                    'fallback_to_vector': True
+                }
+            elif test_response.status_code == 401:
+                return {
+                    'success': False,
+                    'error': 'Authentication failed. Please check your Mapbox token permissions.'
+                }
+            elif test_response.status_code != 200:
+                return {
+                    'success': False,
+                    'error': f'Failed to verify account capabilities: {test_response.status_code}'
+                }
+            
             # Step 1: Analyze NetCDF structure
             ds = xr.open_dataset(netcdf_path)
             wind_components = self._find_wind_components(ds)
             
             if not wind_components:
                 logger.error("No wind components found in NetCDF")
+                ds.close()
                 return {
                     'success': False,
                     'error': 'No wind components (u/v) found in NetCDF file'
@@ -54,6 +77,7 @@ class MTSRasterManager:
             source_result = await self._create_tileset_source(netcdf_path, source_id)
             
             if not source_result['success']:
+                ds.close()
                 return source_result
             
             # Step 3: Create MTS recipe for raster-array
@@ -63,12 +87,14 @@ class MTSRasterManager:
             tileset_result = await self._create_tileset(tileset_id, recipe)
             
             if not tileset_result['success']:
+                ds.close()
                 return tileset_result
             
             # Step 5: Publish tileset
             publish_result = await self._publish_tileset(tileset_id)
             
             if not publish_result['success']:
+                ds.close()
                 return publish_result
             
             ds.close()
@@ -86,6 +112,15 @@ class MTSRasterManager:
             logger.error(f"Error creating MTS raster tileset: {str(e)}")
             import traceback
             traceback.print_exc()
+            
+            # Check if it's a known Pro account requirement error
+            if "credentials" in str(e).lower() or "422" in str(e):
+                return {
+                    'success': False,
+                    'error': 'Raster-array format requires a Mapbox Pro account. Please use Vector format instead.',
+                    'fallback_to_vector': True
+                }
+            
             return {
                 'success': False,
                 'error': str(e)
@@ -140,6 +175,14 @@ class MTSRasterManager:
             else:
                 error_msg = f"Failed to create source: {response.status_code} - {response.text}"
                 logger.error(error_msg)
+                
+                # Check for specific error codes
+                if response.status_code == 422:
+                    return {
+                        'success': False,
+                        'error': 'This operation requires a Mapbox Pro account.'
+                    }
+                
                 return {
                     'success': False,
                     'error': error_msg
@@ -219,6 +262,14 @@ class MTSRasterManager:
             else:
                 error_msg = f"Failed to create tileset: {response.status_code} - {response.text}"
                 logger.error(error_msg)
+                
+                # Check for Pro account requirement
+                if response.status_code == 422 or "rasterarray" in response.text.lower():
+                    return {
+                        'success': False,
+                        'error': 'Raster-array tilesets require a Mapbox Pro account.'
+                    }
+                
                 return {
                     'success': False,
                     'error': error_msg

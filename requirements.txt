@@ -1,53 +1,48 @@
-# FastAPI and Web Framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-aiofiles==23.2.1
-jinja2==3.1.2
+# Core web framework
+fastapi
+uvicorn[standard]
+python-multipart
+jinja2
+websockets
+aiofiles
 
-# Data Processing
-xarray==2023.10.1
-netCDF4==1.6.5
-numpy==1.26.2
-pandas==2.1.3
-scipy==1.11.4
-
-# Geospatial
-geopandas==0.14.1
-shapely==2.0.2
-pyproj==3.6.1
-rasterio==1.3.9
-fiona==1.9.5
-rio-cogeo==5.0.0
-
-# Mapbox and Tilesets
-mapbox==0.18.1
-mapbox-tilesets==1.8.0
-mercantile==1.2.1
-supermercado==0.2.0
+# NetCDF and geospatial processing
+xarray
+netCDF4
+h5netcdf
+rioxarray
+rasterio
+pyproj
+shapely
 
 # AWS S3 for Mapbox uploads
-boto3==1.29.7
-botocore==1.32.7
+boto3
 
-# API and HTTP
-requests==2.31.0
-httpx==0.25.2
+# Data processing and analysis
+numpy
+pandas
+scipy
+dask[complete]
 
-# Environment and Config
-python-dotenv==1.0.0
-pydantic==2.5.2
-pydantic-settings==2.1.0
+# Visualization and image processing
+matplotlib
+pillow
+imageio
 
-# Utilities
-click==8.1.7
-tqdm==4.66.1
+# HTTP requests
+requests
+httpx
 
-# Logging
-loguru==0.7.2
+# Environment configuration
+python-dotenv
 
-# Development (optional)
-pytest==7.4.3
-pytest-asyncio==0.21.1
-black==23.11.0
-flake8==6.1.0
+# CLI support
+click
+rich
+
+# Logging and monitoring
+python-json-logger
+
+# Type hints and validation
+pydantic
+pydantic-settings
