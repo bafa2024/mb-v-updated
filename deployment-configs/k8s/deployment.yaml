@@ -1,0 +1,71 @@
+﻿apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weather-visualization
+  labels:
+    app: weather-visualization
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: weather-visualization
+  template:
+    metadata:
+      labels:
+        app: weather-visualization
+    spec:
+      containers:
+      - name: weather-app
+        image: your-registry/weather-visualization:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: MAPBOX_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mapbox-secrets
+              key: token
+        - name: MAPBOX_PUBLIC_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: mapbox-secrets
+              key: public-token
+        - name: MAPBOX_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: mapbox-secrets
+              key: username
+        - name: MAX_UPLOAD_SIZE
+          value: "500"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weather-visualization-service
+spec:
+  selector:
+    app: weather-visualization
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: LoadBalancer

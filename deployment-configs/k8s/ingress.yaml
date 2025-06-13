@@ -1,0 +1,25 @@
+﻿apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: weather-visualization-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "75"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: weather.yourdomain.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: weather-visualization-service
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - weather.yourdomain.com
+    secretName: weather-tls-secret

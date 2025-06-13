@@ -1,0 +1,86 @@
+﻿{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "webAppName": {
+      "type": "string",
+      "defaultValue": "weather-viz-app",
+      "metadata": {
+        "description": "Name of the web app"
+      }
+    },
+    "sku": {
+      "type": "string",
+      "defaultValue": "B1",
+      "metadata": {
+        "description": "The SKU of App Service Plan"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for all resources"
+      }
+    }
+  },
+  "variables": {
+    "appServicePlanName": "[concat('plan-', parameters('webAppName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2021-02-01",
+      "name": "[variables('appServicePlanName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[parameters('sku')]"
+      },
+      "kind": "linux",
+      "properties": {
+        "reserved": true
+      }
+    },
+    {
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2021-02-01",
+      "name": "[parameters('webAppName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]"
+      ],
+      "properties": {
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]",
+        "siteConfig": {
+          "linuxFxVersion": "PYTHON|3.11",
+          "appCommandLine": "gunicorn -k uvicorn.workers.UvicornWorker app:app",
+          "alwaysOn": true,
+          "ftpsState": "FtpsOnly",
+          "appSettings": [
+            {
+              "name": "MAPBOX_TOKEN",
+              "value": "your_token_here"
+            },
+            {
+              "name": "MAPBOX_PUBLIC_TOKEN",
+              "value": "your_public_token_here"
+            },
+            {
+              "name": "MAPBOX_USERNAME",
+              "value": "your_username_here"
+            },
+            {
+              "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+              "value": "true"
+            },
+            {
+              "name": "WEBSITES_PORT",
+              "value": "8000"
+            }
+          ]
+        },
+        "httpsOnly": true
+      }
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-# app.py - Weather Visualization Application with Vector/Raster Support and Client-Side Animation
+# app.py - Weather Visualization Application with Region-Focused Animation
 from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -154,9 +154,12 @@ async def main_page(request: Request):
                                 recipe_data = json.load(f)
                                 tileset_info['format'] = recipe_data.get('actual_format', recipe_data.get('format', 'vector'))
                                 tileset_info['source_layer'] = recipe_data.get('source_layer')
-                                tileset_info['session_id'] = recipe_data.get('session_id')  # For client-side animation
+                                tileset_info['session_id'] = recipe_data.get('session_id')
                                 tileset_info['requested_format'] = recipe_data.get('requested_format', 'vector')
                                 tileset_info['use_client_animation'] = recipe_data.get('use_client_animation', False)
+                                tileset_info['bounds'] = recipe_data.get('bounds')  # Add bounds info
+                                tileset_info['center'] = recipe_data.get('center')  # Add center info
+                                tileset_info['zoom'] = recipe_data.get('zoom')      # Add zoom info
                         except:
                             tileset_info['format'] = 'vector'
                     else:
@@ -239,6 +242,8 @@ async def upload_netcdf(
                 'file_path': str(file_path),
                 'wind_data': result['wind_data'],
                 'bounds': result.get('bounds'),
+                'center': result.get('center'),
+                'zoom': result.get('zoom'),
                 'created_at': datetime.now().isoformat()
             }
             result['session_id'] = job_id
@@ -322,6 +327,9 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         else:
             logger.warning("Could not determine dataset bounds")
         
+        # Calculate optimal center and zoom for the data region
+        center, zoom = calculate_optimal_view(bounds) if bounds else (None, None)
+        
         # Get data previews
         previews = {}
         for var_name in list(ds.data_vars)[:5]:  # Preview first 5 variables
@@ -383,6 +391,8 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "metadata": metadata,
             "wind_components": wind_components,
             "bounds": bounds,
+            "center": center,
+            "zoom": zoom,
             "visualization_type": visualization_type,
             "requested_format": "raster-array" if visualization_type == "raster-array" else "vector",
             "created_at": datetime.now().isoformat(),
@@ -401,6 +411,8 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "metadata": metadata,
             "wind_components": wind_components,
             "bounds": bounds,
+            "center": center,
+            "zoom": zoom,
             "visualization_type": visualization_type,
             "requested_format": "raster-array" if visualization_type == "raster-array" else "vector",
             "scalar_vars": scalar_vars,
@@ -423,6 +435,45 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             error_msg = "NetCDF file encoding error. The file may be corrupted."
         
         raise Exception(error_msg)
+
+def calculate_optimal_view(bounds: Dict) -> tuple:
+    """Calculate optimal center point and zoom level for given bounds"""
+    if not bounds:
+        return None, None
+    
+    # Calculate center
+    center_lon = (bounds['east'] + bounds['west']) / 2
+    center_lat = (bounds['north'] + bounds['south']) / 2
+    
+    # Calculate zoom level based on bounds
+    lat_diff = bounds['north'] - bounds['south']
+    lon_diff = bounds['east'] - bounds['west']
+    
+    # Use the larger dimension to calculate zoom
+    max_diff = max(lat_diff, lon_diff)
+    
+    # Approximate zoom calculation (simplified)
+    # These values work well for most cases
+    if max_diff > 180:
+        zoom = 1
+    elif max_diff > 90:
+        zoom = 2
+    elif max_diff > 45:
+        zoom = 3
+    elif max_diff > 22:
+        zoom = 4
+    elif max_diff > 11:
+        zoom = 5
+    elif max_diff > 5.5:
+        zoom = 6
+    elif max_diff > 2.8:
+        zoom = 7
+    elif max_diff > 1.4:
+        zoom = 8
+    else:
+        zoom = 9
+    
+    return [center_lon, center_lat], zoom
 
 def extract_wind_data_for_client(ds, wind_components, bounds):
     """Extract wind data in a format suitable for client-side animation"""
@@ -660,18 +711,21 @@ def save_recipe_info(tileset_id: str, result: Dict, viz_info: Dict):
         "tileset_id": tileset_id,
         "mapbox_tileset": result['tileset_id'],
         "created": datetime.now().isoformat(),
-        "format": actual_format,  # The actual format created
-        "actual_format": actual_format,  # Explicitly store actual format
-        "requested_format": viz_info.get('requested_format', 'vector'),  # What was requested
+        "format": actual_format,
+        "actual_format": actual_format,
+        "requested_format": viz_info.get('requested_format', 'vector'),
         "source_layer": result.get('source_layer', 'weather_data' if actual_format == 'vector' else '10winds'),
         "recipe_id": result.get('recipe_id'),
         "publish_job_id": result.get('publish_job_id'),
         "scalar_vars": viz_info.get("scalar_vars", []),
         "vector_pairs": viz_info.get("vector_pairs", []),
         "visualization_type": viz_info.get('visualization_type', 'vector'),
-        "is_raster_array": actual_format == 'raster-array',  # Explicit flag
+        "is_raster_array": actual_format == 'raster-array',
         "use_client_animation": viz_info.get('use_client_animation', False),
-        "session_id": viz_info.get('session_id')  # Store session ID for client-side animation
+        "session_id": viz_info.get('session_id'),
+        "bounds": viz_info.get('bounds'),  # Save bounds
+        "center": viz_info.get('center'),  # Save center
+        "zoom": viz_info.get('zoom')       # Save zoom
     }
     
     try:
@@ -707,7 +761,10 @@ async def get_visualization_status(job_id: str):
         "publish_job_id": viz_info.get('publish_job_id'),
         "visualization_type": viz_info.get('visualization_type', 'vector'),
         "use_client_animation": viz_info.get('use_client_animation', False),
-        "session_id": viz_info.get('session_id')
+        "session_id": viz_info.get('session_id'),
+        "bounds": viz_info.get('bounds'),
+        "center": viz_info.get('center'),
+        "zoom": viz_info.get('zoom')
     })
 
 @app.get("/api/tileset-status/{username}/{tileset_id}")
@@ -774,6 +831,9 @@ async def load_tileset(tileset_id: str = Form(...)):
         is_raster_array = False
         use_client_animation = False
         session_id = None
+        bounds = None
+        center = None
+        zoom = None
         
         if recipe_files:
             try:
@@ -789,6 +849,9 @@ async def load_tileset(tileset_id: str = Form(...)):
                     is_raster_array = recipe_data.get('is_raster_array', False)
                     use_client_animation = recipe_data.get('use_client_animation', False)
                     session_id = recipe_data.get('session_id')
+                    bounds = recipe_data.get('bounds')
+                    center = recipe_data.get('center')
+                    zoom = recipe_data.get('zoom')
                     
                     # Double-check format based on source layer
                     if source_layer == '10winds' or is_raster_array:
@@ -817,7 +880,7 @@ async def load_tileset(tileset_id: str = Form(...)):
             "success": True,
             "tileset_id": tileset_id,
             "type": "user",
-            "format": actual_format,  # Use the verified actual format
+            "format": actual_format,
             "actual_format": actual_format,
             "requested_format": requested_format,
             "config": {
@@ -828,7 +891,10 @@ async def load_tileset(tileset_id: str = Form(...)):
                 "format": actual_format,
                 "is_raster_array": actual_format == 'raster-array',
                 "use_client_animation": use_client_animation,
-                "session_id": session_id
+                "session_id": session_id,
+                "bounds": bounds,
+                "center": center,
+                "zoom": zoom
             }
         })
         
@@ -898,7 +964,10 @@ async def get_active_visualizations():
                 "scalar_vars": viz.get('scalar_vars', []),
                 "vector_pairs": viz.get('vector_pairs', []),
                 "use_client_animation": viz.get('use_client_animation', False),
-                "session_id": viz.get('session_id')
+                "session_id": viz.get('session_id'),
+                "bounds": viz.get('bounds'),
+                "center": viz.get('center'),
+                "zoom": viz.get('zoom')
             }
             for job_id, viz in active_visualizations.items()
         ]

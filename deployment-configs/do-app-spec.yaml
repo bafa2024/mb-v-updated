@@ -1,0 +1,42 @@
+﻿name: weather-visualization
+region: nyc
+services:
+- name: web
+  github:
+    repo: yourusername/weather-visualization
+    branch: main
+    deploy_on_push: true
+  build_command: pip install -r requirements.txt && python setup_environment.py
+  run_command: uvicorn app:app --host 0.0.0.0 --port 8080 --workers 2
+  source_dir: /
+  environment_slug: python
+  instance_size_slug: professional-xs
+  instance_count: 1
+  http_port: 8080
+  routes:
+  - path: /
+  envs:
+  - key: MAPBOX_TOKEN
+    type: SECRET
+    value: YOUR_TOKEN
+  - key: MAPBOX_PUBLIC_TOKEN
+    type: SECRET
+    value: YOUR_PUBLIC_TOKEN
+  - key: MAPBOX_USERNAME
+    scope: RUN_TIME
+    value: YOUR_USERNAME
+  - key: MAX_UPLOAD_SIZE
+    scope: RUN_TIME
+    value: "500"
+  - key: PYTHON_VERSION
+    scope: BUILD_TIME
+    value: "3.11.5"
+static_sites:
+- name: static
+  github:
+    repo: yourusername/weather-visualization
+    branch: main
+    deploy_on_push: true
+  source_dir: /static
+  routes:
+  - path: /static

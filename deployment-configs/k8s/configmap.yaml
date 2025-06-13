@@ -1,0 +1,8 @@
+﻿apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weather-app-config
+data:
+  max_upload_size: "500"
+  log_level: "INFO"
+  debug: "False"

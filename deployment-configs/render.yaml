@@ -1,0 +1,23 @@
+﻿services:
+  - type: web
+    name: weather-visualization
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: MAPBOX_TOKEN
+        sync: false
+      - key: MAPBOX_PUBLIC_TOKEN
+        sync: false
+      - key: MAPBOX_USERNAME
+        sync: false
+      - key: MAX_UPLOAD_SIZE
+        value: "500"
+      - key: DEBUG
+        value: "False"
+      - key: LOG_LEVEL
+        value: "INFO"
+    disk:
+      name: weather-data
+      mountPath: /var/data
+      sizeGB: 10

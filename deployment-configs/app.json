@@ -1,0 +1,37 @@
+﻿{
+  "name": "Weather Visualization Platform",
+  "description": "NetCDF weather data visualization using Mapbox",
+  "repository": "https://github.com/yourusername/weather-visualization",
+  "keywords": ["python", "fastapi", "mapbox", "weather", "netcdf"],
+  "addons": [],
+  "buildpacks": [
+    {
+      "url": "heroku/python"
+    }
+  ],
+  "env": {
+    "MAPBOX_TOKEN": {
+      "description": "Your Mapbox secret token with upload permissions",
+      "required": true
+    },
+    "MAPBOX_PUBLIC_TOKEN": {
+      "description": "Your Mapbox public token",
+      "required": true
+    },
+    "MAPBOX_USERNAME": {
+      "description": "Your Mapbox username",
+      "required": true
+    },
+    "MAX_UPLOAD_SIZE": {
+      "description": "Maximum upload size in MB",
+      "value": "500",
+      "required": false
+    }
+  },
+  "formation": {
+    "web": {
+      "quantity": 1,
+      "size": "standard-1x"
+    }
+  }
+}
