@@ -1,5 +1,5 @@
 """
-Mapbox Tileset Management Module - Fixed Version
+Mapbox Tileset Management Module - Fixed Version with Enhanced Format Detection
 Handles creation and management of Mapbox tilesets from NetCDF data
 """
 
@@ -261,6 +261,134 @@ class MapboxTilesetManager:
         except Exception as e:
             logger.error(f"Error publishing tileset: {str(e)}")
             return {"success": False, "error": str(e)}
+    
+    def check_tileset_format(self, tileset_id: str) -> Dict[str, Any]:
+        """
+        Check the actual format of a tileset on Mapbox
+        Returns detailed information about the tileset type
+        """
+        try:
+            # Ensure we have the full tileset ID
+            if '.' not in tileset_id:
+                tileset_id = f"{self.username}.{tileset_id}"
+            
+            url = f"{self.api_base}/tilesets/v1/{tileset_id}?access_token={self.access_token}"
+            response = requests.get(url)
+            
+            if response.status_code == 200:
+                tileset_info = response.json()
+                
+                # Determine the actual format
+                tileset_type = tileset_info.get('type', '').lower()
+                format_type = 'vector'  # default
+                
+                # Check various indicators for raster format
+                if any(indicator in tileset_type for indicator in ['raster', 'rasterarray', 'raster-array']):
+                    format_type = 'raster-array'
+                elif 'vector' in tileset_type:
+                    format_type = 'vector'
+                
+                # Additional checks
+                layers = tileset_info.get('layers', [])
+                if layers:
+                    # Check layer types
+                    for layer in layers:
+                        if isinstance(layer, dict):
+                            layer_type = layer.get('type', '').lower()
+                            if 'raster' in layer_type:
+                                format_type = 'raster-array'
+                                break
+                
+                return {
+                    'success': True,
+                    'tileset_id': tileset_id,
+                    'format': format_type,
+                    'type': tileset_type,
+                    'layers': layers,
+                    'name': tileset_info.get('name', ''),
+                    'created': tileset_info.get('created', ''),
+                    'modified': tileset_info.get('modified', '')
+                }
+            elif response.status_code == 404:
+                return {
+                    'success': False,
+                    'error': 'Tileset not found',
+                    'code': 404
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': f'Failed to get tileset info: {response.status_code}',
+                    'code': response.status_code
+                }
+                
+        except Exception as e:
+            logger.error(f"Error checking tileset format: {str(e)}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def verify_tileset_ready(self, tileset_id: str, max_attempts: int = 30) -> Dict[str, Any]:
+        """
+        Verify that a tileset is ready for use
+        Waits for processing to complete if needed
+        """
+        try:
+            if '.' not in tileset_id:
+                tileset_id = f"{self.username}.{tileset_id}"
+            
+            for attempt in range(max_attempts):
+                # Check tileset status
+                format_check = self.check_tileset_format(tileset_id)
+                
+                if format_check.get('success'):
+                    # Tileset exists, check if it's ready
+                    tileset_info = format_check
+                    
+                    # For raster tilesets, we might need to wait for processing
+                    if format_check.get('format') == 'raster-array':
+                        # Check if there are any active jobs
+                        jobs_url = f"{self.api_base}/tilesets/v1/{tileset_id}/jobs?access_token={self.access_token}&limit=1"
+                        jobs_response = requests.get(jobs_url)
+                        
+                        if jobs_response.status_code == 200:
+                            jobs = jobs_response.json()
+                            if jobs and len(jobs) > 0:
+                                latest_job = jobs[0]
+                                if latest_job.get('stage') not in ['success', 'failed']:
+                                    logger.info(f"Tileset still processing, attempt {attempt + 1}/{max_attempts}")
+                                    time.sleep(5)
+                                    continue
+                    
+                    # Tileset is ready
+                    return {
+                        'success': True,
+                        'ready': True,
+                        'format': format_check.get('format'),
+                        'tileset_info': tileset_info
+                    }
+                elif format_check.get('code') == 404:
+                    # Tileset doesn't exist yet
+                    logger.info(f"Tileset not found yet, attempt {attempt + 1}/{max_attempts}")
+                    time.sleep(5)
+                    continue
+                else:
+                    # Some other error
+                    return format_check
+            
+            return {
+                'success': False,
+                'error': 'Tileset verification timeout',
+                'ready': False
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'ready': False
+            }
     
     def _convert_netcdf_to_geojson(self, netcdf_path: str) -> Optional[str]:
         """Convert NetCDF to line-delimited GeoJSON for vector tiles"""

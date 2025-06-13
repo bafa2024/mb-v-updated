@@ -1,4 +1,4 @@
-# app.py - Weather Visualization Application with Vector/Raster Support
+# app.py - Weather Visualization Application with Vector/Raster Support and Client-Side Animation
 from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -103,6 +103,7 @@ class ProcessingStatus(BaseModel):
 
 # In-memory storage
 active_visualizations = {}
+active_sessions = {}  # Store session data for client-side animation
 
 # Default weather tileset
 DEFAULT_TILESET = {
@@ -153,6 +154,7 @@ async def main_page(request: Request):
                                 recipe_data = json.load(f)
                                 tileset_info['format'] = recipe_data.get('format', 'vector')
                                 tileset_info['source_layer'] = recipe_data.get('source_layer')
+                                tileset_info['session_id'] = recipe_data.get('session_id')  # For client-side animation
                         except:
                             tileset_info['format'] = 'vector'
                     else:
@@ -228,6 +230,16 @@ async def upload_netcdf(
         result = await process_netcdf_file(
             file_path, job_id, create_tileset, tileset_name, visualization_type
         )
+        
+        # Store session data for client-side animation
+        if result.get('wind_data'):
+            active_sessions[job_id] = {
+                'file_path': str(file_path),
+                'wind_data': result['wind_data'],
+                'bounds': result.get('bounds'),
+                'created_at': datetime.now().isoformat()
+            }
+            result['session_id'] = job_id
         
         if create_tileset and Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
             # Start background tileset creation
@@ -329,6 +341,11 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             except:
                 pass
         
+        # Extract wind data for client-side animation
+        wind_data = None
+        if wind_components and visualization_type in ['raster-array', 'client-side']:
+            wind_data = extract_wind_data_for_client(ds, wind_components, bounds)
+        
         # Generate tileset ID
         if not tileset_name:
             filename = Path(file_path).stem.split('_', 1)[-1]  # Remove job_id prefix
@@ -364,12 +381,13 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "metadata": metadata,
             "wind_components": wind_components,
             "bounds": bounds,
-            "visualization_type": visualization_type,  # Store the requested type
+            "visualization_type": visualization_type,
             "requested_format": "raster-array" if visualization_type == "raster-array" else "vector",
             "created_at": datetime.now().isoformat(),
             "status": "processing",
             "scalar_vars": scalar_vars,
-            "vector_pairs": vector_pairs
+            "vector_pairs": vector_pairs,
+            "session_id": job_id  # Link to session for client-side animation
         }
         
         ds.close()
@@ -385,7 +403,9 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "requested_format": "raster-array" if visualization_type == "raster-array" else "vector",
             "scalar_vars": scalar_vars,
             "vector_pairs": vector_pairs,
-            "previews": previews
+            "previews": previews,
+            "wind_data": wind_data,
+            "session_id": job_id
         }
         
     except Exception as e:
@@ -401,6 +421,55 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             error_msg = "NetCDF file encoding error. The file may be corrupted."
         
         raise Exception(error_msg)
+
+def extract_wind_data_for_client(ds, wind_components, bounds):
+    """Extract wind data in a format suitable for client-side animation"""
+    try:
+        u_var = ds[wind_components['u']]
+        v_var = ds[wind_components['v']]
+        
+        # Handle time dimension
+        if 'time' in u_var.dims:
+            u_var = u_var.isel(time=0)
+            v_var = v_var.isel(time=0)
+        
+        # Get coordinate arrays
+        lats = ds.lat.values if 'lat' in ds else ds.latitude.values
+        lons = ds.lon.values if 'lon' in ds else ds.longitude.values
+        
+        # Subsample if data is too large (max 150x150 for performance)
+        max_points = 150
+        lat_step = max(1, len(lats) // max_points)
+        lon_step = max(1, len(lons) // max_points)
+        
+        lats_sub = lats[::lat_step]
+        lons_sub = lons[::lon_step]
+        u_sub = u_var.values[::lat_step, ::lon_step]
+        v_sub = v_var.values[::lat_step, ::lon_step]
+        
+        # Handle NaN values
+        u_sub = np.nan_to_num(u_sub, nan=0.0)
+        v_sub = np.nan_to_num(v_sub, nan=0.0)
+        
+        # Calculate speed
+        speed = np.sqrt(u_sub**2 + v_sub**2)
+        
+        return {
+            "grid": {
+                "lats": lats_sub.tolist(),
+                "lons": lons_sub.tolist(),
+                "shape": list(u_sub.shape)
+            },
+            "u_component": u_sub.tolist(),
+            "v_component": v_sub.tolist(),
+            "speed": speed.tolist(),
+            "metadata": {
+                "units": u_var.attrs.get('units', 'm/s')
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error extracting wind data for client: {e}")
+        return None
 
 def find_wind_components(ds):
     """Find U and V wind components in dataset"""
@@ -480,6 +549,10 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
         
         logger.info(f"Creating {requested_format} tileset from {file_path_str}")
         
+        # Initialize variables
+        actual_format = None
+        result = None
+        
         # Check if raster-array was requested
         if requested_format == 'raster-array' and Config.MAPBOX_TOKEN:
             # First try raster-array if requested
@@ -492,67 +565,76 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
             result = await raster_manager.create_raster_tileset(file_path_str, tileset_id)
             
             if result['success']:
+                actual_format = 'raster-array'
                 # Update visualization info
                 if job_id in active_visualizations:
                     active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
                     active_visualizations[job_id]['status'] = 'completed'
                     active_visualizations[job_id]['format'] = 'raster-array'
                     active_visualizations[job_id]['actual_format'] = 'raster-array'
+                    active_visualizations[job_id]['requested_format'] = 'raster-array'
                     active_visualizations[job_id]['source_layer'] = result.get('source_layer', '10winds')
                     active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
                     active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
                     
-                    # Save recipe info
+                    # Save recipe info with proper format
                     save_recipe_info(tileset_id, result, active_visualizations[job_id])
                     
                 logger.info("Successfully created raster-array tileset")
                 return
             else:
                 # Check if it's a Pro account issue
-                if result.get('fallback_to_vector', False):
+                if result.get('fallback_to_vector', False) or result.get('error_code') == 422:
                     logger.warning("Raster-array requires Pro account, falling back to vector")
                     if job_id in active_visualizations:
                         active_visualizations[job_id]['warning'] = result.get('error', 'Falling back to vector format')
+                        active_visualizations[job_id]['use_client_animation'] = True  # Flag for client-side animation
+                    actual_format = 'vector'  # Will fall back to vector
                 else:
                     # Some other error occurred
                     logger.error(f"Raster tileset creation failed: {result.get('error')}")
                     if job_id in active_visualizations:
                         active_visualizations[job_id]['error'] = result.get('error')
+                        active_visualizations[job_id]['status'] = 'failed'
+                    return
         
-        # Fall back to vector format
-        logger.info("Creating vector tileset...")
-        
-        manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-        
-        # Process NetCDF to tileset
-        result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
-        
-        if result['success']:
-            # Update visualization info
-            if job_id in active_visualizations:
-                active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
-                active_visualizations[job_id]['status'] = 'completed'
-                active_visualizations[job_id]['format'] = 'vector'
-                active_visualizations[job_id]['actual_format'] = 'vector'
-                active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
-                active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
-                active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
-                
-                # Add warning if raster was requested but vector was created
-                if requested_format == 'raster-array':
-                    active_visualizations[job_id]['format_fallback'] = True
-                    active_visualizations[job_id]['warning'] = 'Created vector format (raster-array requires Pro account)'
-                
-                # Save recipe info
-                save_recipe_info(tileset_id, result, active_visualizations[job_id])
-                        
-        else:
-            error_msg = result.get('error', 'Unknown error')
-            logger.error(f"Tileset creation failed: {error_msg}")
+        # Fall back to vector format (or if vector was requested)
+        if actual_format != 'raster-array':
+            logger.info("Creating vector tileset...")
             
-            if job_id in active_visualizations:
-                active_visualizations[job_id]['status'] = 'failed'
-                active_visualizations[job_id]['error'] = error_msg
+            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            
+            # Process NetCDF to tileset
+            result = manager.process_netcdf_to_tileset(file_path_str, tileset_id)
+            
+            if result['success']:
+                actual_format = 'vector'
+                # Update visualization info
+                if job_id in active_visualizations:
+                    active_visualizations[job_id]['mapbox_tileset'] = result['tileset_id']
+                    active_visualizations[job_id]['status'] = 'completed'
+                    active_visualizations[job_id]['format'] = 'vector'
+                    active_visualizations[job_id]['actual_format'] = 'vector'
+                    active_visualizations[job_id]['source_layer'] = result.get('source_layer', 'weather_data')
+                    active_visualizations[job_id]['recipe_id'] = result.get('recipe_id')
+                    active_visualizations[job_id]['publish_job_id'] = result.get('publish_job_id')
+                    
+                    # Add warning if raster was requested but vector was created
+                    if requested_format == 'raster-array':
+                        active_visualizations[job_id]['format_fallback'] = True
+                        active_visualizations[job_id]['warning'] = 'Created vector format (raster-array requires Pro account)'
+                        active_visualizations[job_id]['use_client_animation'] = True
+                    
+                    # Save recipe info with correct formats
+                    save_recipe_info(tileset_id, result, active_visualizations[job_id])
+                        
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                logger.error(f"Tileset creation failed: {error_msg}")
+                
+                if job_id in active_visualizations:
+                    active_visualizations[job_id]['status'] = 'failed'
+                    active_visualizations[job_id]['error'] = error_msg
                 
     except Exception as e:
         logger.error(f"Error creating tileset: {str(e)}")
@@ -566,19 +648,28 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
 def save_recipe_info(tileset_id: str, result: Dict, viz_info: Dict):
     """Save recipe information for future reference"""
     recipe_path = Config.RECIPE_DIR / f"recipe_{tileset_id}.json"
+    
+    # Ensure we capture the actual format that was created
+    actual_format = result.get('format', 'vector')
+    if 'raster' in str(result.get('tileset_id', '')).lower() or result.get('format') == 'raster-array':
+        actual_format = 'raster-array'
+    
     recipe_data = {
         "tileset_id": tileset_id,
         "mapbox_tileset": result['tileset_id'],
         "created": datetime.now().isoformat(),
-        "format": result.get('format', 'vector'),
-        "actual_format": result.get('format', 'vector'),
-        "requested_format": viz_info.get('requested_format', 'vector'),
-        "source_layer": result.get('source_layer', 'weather_data'),
+        "format": actual_format,  # The actual format created
+        "actual_format": actual_format,  # Explicitly store actual format
+        "requested_format": viz_info.get('requested_format', 'vector'),  # What was requested
+        "source_layer": result.get('source_layer', 'weather_data' if actual_format == 'vector' else '10winds'),
         "recipe_id": result.get('recipe_id'),
         "publish_job_id": result.get('publish_job_id'),
         "scalar_vars": viz_info.get("scalar_vars", []),
         "vector_pairs": viz_info.get("vector_pairs", []),
-        "visualization_type": viz_info.get('visualization_type', 'vector')
+        "visualization_type": viz_info.get('visualization_type', 'vector'),
+        "is_raster_array": actual_format == 'raster-array',  # Explicit flag
+        "use_client_animation": viz_info.get('use_client_animation', False),
+        "session_id": viz_info.get('session_id')  # Store session ID for client-side animation
     }
     
     try:
@@ -612,7 +703,9 @@ async def get_visualization_status(job_id: str):
         "vector_pairs": viz_info.get('vector_pairs', []),
         "source_layer": viz_info.get('source_layer'),
         "publish_job_id": viz_info.get('publish_job_id'),
-        "visualization_type": viz_info.get('visualization_type', 'vector')
+        "visualization_type": viz_info.get('visualization_type', 'vector'),
+        "use_client_animation": viz_info.get('use_client_animation', False),
+        "session_id": viz_info.get('session_id')
     })
 
 @app.get("/api/tileset-status/{username}/{tileset_id}")
@@ -676,6 +769,9 @@ async def load_tileset(tileset_id: str = Form(...)):
         scalar_vars = []
         vector_pairs = []
         visualization_type = 'vector'
+        is_raster_array = False
+        use_client_animation = False
+        session_id = None
         
         if recipe_files:
             try:
@@ -688,12 +784,19 @@ async def load_tileset(tileset_id: str = Form(...)):
                     scalar_vars = recipe_data.get('scalar_vars', [])
                     vector_pairs = recipe_data.get('vector_pairs', [])
                     visualization_type = recipe_data.get('visualization_type', 'vector')
+                    is_raster_array = recipe_data.get('is_raster_array', False)
+                    use_client_animation = recipe_data.get('use_client_animation', False)
+                    session_id = recipe_data.get('session_id')
+                    
+                    # Double-check format based on source layer
+                    if source_layer == '10winds' or is_raster_array:
+                        actual_format = 'raster-array'
                     
                 logger.info(f"Found recipe for {tileset_name}, format: {format_type}, actual: {actual_format}, requested: {requested_format}")
             except Exception as e:
                 logger.error(f"Error reading recipe: {e}")
         
-        # Check if tileset exists on Mapbox
+        # Check if tileset exists on Mapbox and verify its type
         if Config.MAPBOX_TOKEN:
             manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
             tileset_info = manager.get_tileset_status(tileset_name)
@@ -704,15 +807,21 @@ async def load_tileset(tileset_id: str = Form(...)):
                 
                 # Check the actual tileset type from Mapbox
                 if 'type' in tileset_info:
-                    mapbox_type = tileset_info['type']
-                    if 'raster' in mapbox_type.lower():
+                    mapbox_type = tileset_info.get('type', '').lower()
+                    if 'raster' in mapbox_type:
                         actual_format = 'raster-array'
+                        source_layer = '10winds'  # Standard layer for raster wind data
+                    else:
+                        actual_format = 'vector'
+                        source_layer = 'weather_data'
+                        
+                logger.info(f"Mapbox reports tileset type as: {mapbox_type}, format: {actual_format}")
         
         return JSONResponse({
             "success": True,
             "tileset_id": tileset_id,
             "type": "user",
-            "format": format_type,
+            "format": actual_format,  # Use the verified actual format
             "actual_format": actual_format,
             "requested_format": requested_format,
             "config": {
@@ -720,7 +829,10 @@ async def load_tileset(tileset_id: str = Form(...)):
                 "visualization_type": visualization_type,
                 "scalar_vars": scalar_vars,
                 "vector_pairs": vector_pairs,
-                "format": actual_format
+                "format": actual_format,
+                "is_raster_array": actual_format == 'raster-array',
+                "use_client_animation": use_client_animation,
+                "session_id": session_id
             }
         })
         
@@ -730,6 +842,47 @@ async def load_tileset(tileset_id: str = Form(...)):
             "success": False,
             "error": str(e)
         }, status_code=500)
+
+@app.get("/api/wind-data/{session_id}")
+async def get_wind_data(session_id: str):
+    """Get wind data for client-side animation"""
+    if session_id not in active_sessions:
+        # Try to load from active visualizations
+        if session_id in active_visualizations:
+            viz_info = active_visualizations[session_id]
+            file_path = viz_info.get('file_path')
+            
+            if file_path and os.path.exists(file_path):
+                try:
+                    # Re-extract wind data
+                    ds = xr.open_dataset(file_path)
+                    wind_components = viz_info.get('wind_components')
+                    bounds = viz_info.get('bounds')
+                    
+                    if wind_components:
+                        wind_data = extract_wind_data_for_client(ds, wind_components, bounds)
+                        ds.close()
+                        
+                        if wind_data:
+                            return JSONResponse({
+                                "success": True,
+                                **wind_data
+                            })
+                except Exception as e:
+                    logger.error(f"Error re-extracting wind data: {e}")
+        
+        raise HTTPException(404, "Session not found")
+    
+    session_data = active_sessions[session_id]
+    wind_data = session_data.get('wind_data')
+    
+    if not wind_data:
+        raise HTTPException(404, "No wind data available for this session")
+    
+    return JSONResponse({
+        "success": True,
+        **wind_data
+    })
 
 @app.get("/api/active-visualizations")
 async def get_active_visualizations():
@@ -747,7 +900,9 @@ async def get_active_visualizations():
                 "requested_format": viz.get('requested_format', 'vector'),
                 "wind_components": viz.get('wind_components'),
                 "scalar_vars": viz.get('scalar_vars', []),
-                "vector_pairs": viz.get('vector_pairs', [])
+                "vector_pairs": viz.get('vector_pairs', []),
+                "use_client_animation": viz.get('use_client_animation', False),
+                "session_id": viz.get('session_id')
             }
             for job_id, viz in active_visualizations.items()
         ]
@@ -773,6 +928,10 @@ async def delete_visualization(job_id: str):
     # Remove from active visualizations
     del active_visualizations[job_id]
     
+    # Remove from active sessions if exists
+    if job_id in active_sessions:
+        del active_sessions[job_id]
+    
     return {"success": True, "message": "Visualization deleted"}
 
 @app.get("/health")
@@ -783,6 +942,7 @@ async def health_check():
         "mapbox_configured": bool(Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME),
         "mapbox_public_token": bool(Config.MAPBOX_PUBLIC_TOKEN),
         "active_jobs": len(active_visualizations),
+        "active_sessions": len(active_sessions),
         "version": "4.0.0"
     }
 
@@ -797,6 +957,17 @@ async def cleanup_old_files():
                 if file_path.is_file() and file_path.stat().st_mtime < cutoff_time:
                     file_path.unlink()
                     logger.info(f"Cleaned up old file: {file_path}")
+        
+        # Clean up old sessions
+        to_remove = []
+        for session_id, session_data in active_sessions.items():
+            created_at = datetime.fromisoformat(session_data.get('created_at', datetime.now().isoformat()))
+            if (datetime.now() - created_at).total_seconds() > 24 * 3600:
+                to_remove.append(session_id)
+        
+        for session_id in to_remove:
+            del active_sessions[session_id]
+            logger.info(f"Cleaned up old session: {session_id}")
                     
     except Exception as e:
         logger.error(f"Error during cleanup: {e}")
