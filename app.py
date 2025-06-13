@@ -152,9 +152,11 @@ async def main_page(request: Request):
                         try:
                             with open(recipe_files[0], 'r') as f:
                                 recipe_data = json.load(f)
-                                tileset_info['format'] = recipe_data.get('format', 'vector')
+                                tileset_info['format'] = recipe_data.get('actual_format', recipe_data.get('format', 'vector'))
                                 tileset_info['source_layer'] = recipe_data.get('source_layer')
                                 tileset_info['session_id'] = recipe_data.get('session_id')  # For client-side animation
+                                tileset_info['requested_format'] = recipe_data.get('requested_format', 'vector')
+                                tileset_info['use_client_animation'] = recipe_data.get('use_client_animation', False)
                         except:
                             tileset_info['format'] = 'vector'
                     else:
@@ -799,23 +801,17 @@ async def load_tileset(tileset_id: str = Form(...)):
         # Check if tileset exists on Mapbox and verify its type
         if Config.MAPBOX_TOKEN:
             manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-            tileset_info = manager.get_tileset_status(tileset_name)
+            tileset_info = manager.check_tileset_format(tileset_id)
             
-            if 'error' not in tileset_info:
-                # Tileset exists
-                logger.info(f"Tileset {tileset_name} exists on Mapbox")
-                
-                # Check the actual tileset type from Mapbox
-                if 'type' in tileset_info:
-                    mapbox_type = tileset_info.get('type', '').lower()
-                    if 'raster' in mapbox_type:
-                        actual_format = 'raster-array'
-                        source_layer = '10winds'  # Standard layer for raster wind data
-                    else:
-                        actual_format = 'vector'
-                        source_layer = 'weather_data'
-                        
-                logger.info(f"Mapbox reports tileset type as: {mapbox_type}, format: {actual_format}")
+            if tileset_info.get('success'):
+                # Use the format information from Mapbox
+                actual_format = tileset_info.get('format', actual_format)
+                if actual_format == 'raster-array':
+                    source_layer = '10winds'
+                else:
+                    source_layer = 'weather_data'
+                    
+                logger.info(f"Mapbox confirms tileset format: {actual_format}")
         
         return JSONResponse({
             "success": True,

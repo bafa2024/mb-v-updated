@@ -1,0 +1,22 @@
+# Mapbox Configuration
+MAPBOX_TOKEN=sk.eyJ1IjoianB5aXAiLCJhIjoiY21ibzI5MXJ2MXkwMTJzbzlsY3J1dW9ydyJ9.Jr1AN891P6yr7kzhGZnl6g
+MAPBOX_PUBLIC_TOKEN=pk.eyJ1IjoianB5aXAiLCJhIjoiY200NXlyOHAwMTQ0ajJ2b28zbjV6NWpreCJ9.B-V7463HUmjX8bQkBOw54g
+MAPBOX_USERNAME=jpyip
+
+# Optional: AWS Configuration (not required for vector tilesets)
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+AWS_REGION=us-east-1
+
+# Application Configuration
+APP_ENV=production
+DEBUG=False
+LOG_LEVEL=INFO
+
+# File Upload Limits (in MB)
+MAX_UPLOAD_SIZE=500
+
+# Tile Processing
+DEFAULT_TILE_SIZE=512
+MAX_ZOOM_LEVEL=10
+MIN_ZOOM_LEVEL=0

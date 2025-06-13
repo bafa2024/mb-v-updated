@@ -391,8 +391,11 @@
                 <option value="{{ tileset.id }}" 
                         data-type="{{ tileset.type }}"
                         data-format="{{ tileset.format }}"
+                        data-actual-format="{{ tileset.format }}"
+                        data-requested-format="{{ tileset.requested_format if tileset.requested_format else tileset.format }}"
                         data-source-layer="{{ tileset.source_layer if tileset.source_layer else '10winds' }}"
-                        data-session-id="{{ tileset.session_id if tileset.session_id else '' }}">
+                        data-session-id="{{ tileset.session_id if tileset.session_id else '' }}"
+                        data-use-client-animation="{{ 'true' if tileset.use_client_animation else 'false' }}">
                     {{ tileset.name }}
                 </option>
                 {% endfor %}
@@ -1087,6 +1090,7 @@
             option.setAttribute('data-type', 'user');
             option.setAttribute('data-source-layer', status.source_layer || (actualFormat === 'raster-array' ? '10winds' : 'weather_data'));
             option.setAttribute('data-session-id', status.session_id || '');
+            option.setAttribute('data-use-client-animation', status.use_client_animation ? 'true' : 'false');
             
             // Add format indicator to the option text
             const formatIndicator = actualFormat === 'raster-array' ? '🎬' : '📍';
@@ -1108,12 +1112,13 @@
             }, 2000);
         } else if (status.actual_format === 'raster-array') {
             showNotification('🎨 Starting animated visualization... Please wait.', 'info');
+            // Trigger tileset change event
+            setTimeout(() => {
+                selector.dispatchEvent(new Event('change'));
+            }, 3000);
         } else {
             showNotification('🎨 Starting visualization... Please wait.', 'info');
-        }
-        
-        // Trigger tileset change event if not using client-side animation
-        if (!(status.use_client_animation && status.session_id)) {
+            // Trigger tileset change event
             setTimeout(() => {
                 selector.dispatchEvent(new Event('change'));
             }, 3000);
@@ -1203,8 +1208,9 @@
         const requestedFormat = selectedOption.getAttribute('data-requested-format') || format;
         const sourceLayer = selectedOption.getAttribute('data-source-layer') || (actualFormat === 'raster-array' ? '10winds' : 'weather_data');
         const sessionId = selectedOption.getAttribute('data-session-id') || '';
+        const useClientAnimation = selectedOption.getAttribute('data-use-client-animation') === 'true';
         
-        console.log(`Loading tileset: ${tilesetId}, actual format: ${actualFormat}, requested: ${requestedFormat}, session: ${sessionId}`);
+        console.log(`Loading tileset: ${tilesetId}, actual format: ${actualFormat}, requested: ${requestedFormat}, session: ${sessionId}, client animation: ${useClientAnimation}`);
         
         // Clear existing visualization
         clearWindVisualization();
@@ -1213,7 +1219,7 @@
         document.getElementById('loading').classList.add('active');
         
         // Check if we should use client-side animation
-        if (actualFormat === 'vector' && requestedFormat === 'raster-array' && sessionId) {
+        if (useClientAnimation && sessionId && actualFormat === 'vector') {
             // Use client-side animation for vector tilesets that requested raster-array
             document.getElementById('loading').classList.remove('active');
             showNotification('🌀 Loading client-side wind animation...', 'info');
