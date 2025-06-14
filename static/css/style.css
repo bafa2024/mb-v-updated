@@ -1,0 +1,80 @@
+body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+#map {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 100%;
+}
+
+.control-panel {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 1000;
+    background: rgba(0,0,0,0.5);
+    padding: 10px;
+    border-radius: 6px;
+    color: #fff;
+    max-width: 300px;
+}
+
+.control-panel h3 {
+    margin: 0 0 10px;
+}
+
+.btn {
+    display: inline-block;
+    padding: 6px 12px;
+    margin: 5px 0;
+    background: #007bff;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.btn-success {
+    background: #28a745;
+}
+
+.radio-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-size: 13px;
+}
+
+.progress-container {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 1000;
+    background: rgba(0,0,0,0.5);
+    padding: 10px;
+    border-radius: 6px;
+    color: #fff;
+    display: none;
+}
+
+.preview-container,
+#uploadResult {
+    display: none;
+    margin-top: 10px;
+}
+
+#progressBar {
+    width: 0%;
+    height: 10px;
+    background: #28a745;
+    border-radius: 4px;
+}
+
+#progressText {
+    margin-top: 5px;
+    font-size: 13px;
+}

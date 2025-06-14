@@ -121,6 +121,12 @@
             box-shadow: 0 4px 12px rgba(239, 68, 68, 0.3);
         }
         
+        .btn-small {
+            padding: 5px 10px;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+        
         .slider-container {
             margin: 15px 0;
         }
@@ -368,11 +374,212 @@
             border-left: 3px solid #3b82f6;
         }
         
+        /* Multi-file upload styles */
+        .file-list {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            padding: 10px;
+            margin: 10px 0;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            margin: 5px 0;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        
+        .file-item:hover {
+            background: rgba(255, 255, 255, 0.08);
+        }
+        
+        .file-name {
+            flex: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        
+        .file-size {
+            color: #9ca3af;
+            margin-left: 10px;
+            font-size: 12px;
+        }
+        
+        .file-status {
+            margin-left: 10px;
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .file-status.processing {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+        
+        .file-status.completed {
+            background: rgba(16, 185, 129, 0.2);
+            color: #34d399;
+        }
+        
+        .file-status.failed {
+            background: rgba(239, 68, 68, 0.2);
+            color: #f87171;
+        }
+        
+        .remove-file {
+            cursor: pointer;
+            color: #ef4444;
+            font-size: 16px;
+            margin-left: 10px;
+        }
+        
+        .remove-file:hover {
+            color: #dc2626;
+        }
+        
+        .batch-progress {
+            margin: 15px 0;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+        }
+        
+        .batch-stats {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 10px;
+            font-size: 12px;
+        }
+        
+        .batch-stat {
+            text-align: center;
+        }
+        
+        .batch-stat-value {
+            font-size: 18px;
+            font-weight: 600;
+            display: block;
+        }
+        
+        .batch-stat-label {
+            color: #9ca3af;
+            font-size: 11px;
+        }
+        
+        /* Checkbox styles */
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            margin: 10px 0;
+        }
+        
+        .checkbox-container input[type="checkbox"] {
+            margin-right: 8px;
+        }
+        
         @keyframes slideUp {
             to {
                 transform: translateX(-50%) translateY(-20px);
                 opacity: 0;
             }
+        }
+        
+        /* Tab styles for batch results */
+        .tabs {
+            display: flex;
+            margin: 15px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            font-size: 14px;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        
+        .tab:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        
+        .tab.active {
+            border-bottom-color: #3b82f6;
+            color: #3b82f6;
+        }
+        
+        .tab-content {
+            display: none;
+            padding: 15px 0;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* Dataset styles */
+        .dataset-item {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+        }
+        
+        .dataset-item:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(59, 130, 246, 0.5);
+        }
+        
+        .dataset-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+        }
+        
+        .dataset-details {
+            flex: 1;
+        }
+        
+        .dataset-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .dataset-meta {
+            font-size: 12px;
+            color: #9ca3af;
+        }
+        
+        .dataset-actions {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+        }
+        
+        .dataset-actions button {
+            padding: 4px 8px;
+            font-size: 12px;
+        }
+        
+        .dataset-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            font-size: 11px;
+            border-radius: 3px;
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            margin-left: 8px;
         }
     </style>
 </head>
@@ -395,7 +602,8 @@
                         data-requested-format="{{ tileset.requested_format if tileset.requested_format else tileset.format }}"
                         data-source-layer="{{ tileset.source_layer if tileset.source_layer else '10winds' }}"
                         data-session-id="{{ tileset.session_id if tileset.session_id else '' }}"
-                        data-use-client-animation="{{ 'true' if tileset.use_client_animation else 'false' }}">
+                        data-use-client-animation="{{ 'true' if tileset.use_client_animation else 'false' }}"
+                        data-batch-id="{{ tileset.batch_id if tileset.batch_id else '' }}">
                     {{ tileset.name }}
                 </option>
                 {% endfor %}
@@ -404,11 +612,29 @@
         
         <!-- File Upload Section -->
         <div class="control-section">
-            <h4>Upload NetCDF File</h4>
-            <input type="file" id="fileInput" accept=".nc" style="display: none;">
+            <h4>Upload NetCDF Files</h4>
+            
+            <!-- Upload Type Selection -->
+            <div class="radio-group" style="margin-bottom: 15px;">
+                <label style="font-weight: 600; margin-bottom: 10px; display: block;">Upload As:</label>
+                <label><input type="radio" name="uploadType" value="tileset" checked> Tileset (for visualization)</label>
+                <label><input type="radio" name="uploadType" value="dataset"> Dataset (feature collection)</label>
+                <label><input type="radio" name="uploadType" value="both"> Both Tileset & Dataset</label>
+            </div>
+            
+            <input type="file" id="fileInput" accept=".nc" multiple style="display: none;">
             <button class="btn" onclick="document.getElementById('fileInput').click()">
-                📁 Choose NetCDF File
+                📁 Choose NetCDF Files
             </button>
+            <small style="display: block; color: #9ca3af; margin-top: 5px;">
+                Max {{ max_batch_size }} files at once
+            </small>
+            
+            <!-- Selected Files List -->
+            <div id="fileList" class="file-list" style="display: none;">
+                <h5 style="margin: 0 0 10px 0; font-size: 14px;">Selected Files:</h5>
+                <div id="fileItems"></div>
+            </div>
             
             <!-- Visualization Type Selection (hidden by default) -->
             <div id="vizTypeSelection" class="radio-group" style="display: none;">
@@ -421,10 +647,45 @@
                 </div>
             </div>
             
+            <!-- Batch Options -->
+            <div id="batchOptions" style="display: none;">
+                <div class="checkbox-container">
+                    <input type="checkbox" id="mergeFiles" disabled>
+                    <label for="mergeFiles">Merge files into single tileset (Coming soon)</label>
+                </div>
+            </div>
+            
             <button id="uploadBtn" class="btn btn-success" style="display: none;">
-                ⬆️ Upload NetCDF File
+                ⬆️ Upload <span id="fileCount">0</span> File(s)
             </button>
             
+            <button id="clearFilesBtn" class="btn btn-secondary" style="display: none;" onclick="clearSelectedFiles()">
+                🗑️ Clear Selection
+            </button>
+            
+            <!-- Batch Progress -->
+            <div id="batchProgress" class="batch-progress" style="display: none;">
+                <h5 style="margin: 0 0 10px 0;">Batch Processing Progress</h5>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="batchProgressFill">0%</div>
+                </div>
+                <div class="batch-stats">
+                    <div class="batch-stat">
+                        <span class="batch-stat-value" id="batchTotal">0</span>
+                        <span class="batch-stat-label">Total</span>
+                    </div>
+                    <div class="batch-stat">
+                        <span class="batch-stat-value" id="batchCompleted">0</span>
+                        <span class="batch-stat-label">Completed</span>
+                    </div>
+                    <div class="batch-stat">
+                        <span class="batch-stat-value" id="batchFailed">0</span>
+                        <span class="batch-stat-label">Failed</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Individual Progress (for backward compatibility) -->
             <div id="progressContainer" class="progress-container">
                 <div class="progress-bar">
                     <div class="progress-fill" id="progressFill">0%</div>
@@ -432,9 +693,14 @@
                 <small id="progressText" style="display: block; margin-top: 5px; color: #9ca3af;">Uploading...</small>
             </div>
             
-            <div id="uploadResult" style="display: none; margin-top: 20px;">
-                <h4 style="color: white; margin-bottom: 15px;">File Analysis</h4>
-                <div id="fileMetadata" style="background: rgba(255,255,255,0.05); padding: 15px; border-radius: 8px;"></div>
+            <!-- Upload Results Tabs -->
+            <div id="uploadResults" style="display: none;">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('summary')">Summary</div>
+                    <div class="tab" onclick="switchTab('details')">Details</div>
+                </div>
+                <div id="summaryTab" class="tab-content active"></div>
+                <div id="detailsTab" class="tab-content"></div>
             </div>
         </div>
         
@@ -491,6 +757,23 @@
             </button>
         </div>
         
+        <!-- Active Batches Section -->
+        <div id="activeBatches" class="control-section" style="display: none;">
+            <h4>Active Batch Jobs</h4>
+            <div id="batchJobsList"></div>
+        </div>
+        
+        <!-- Datasets Section -->
+        <div id="datasetsSection" class="control-section">
+            <h4>Mapbox Datasets</h4>
+            <button class="btn btn-secondary" onclick="loadDatasets()" style="margin-bottom: 10px;">
+                🔄 Refresh Datasets
+            </button>
+            <div id="datasetsList" style="max-height: 300px; overflow-y: auto;">
+                <p style="color: #9ca3af; text-align: center;">Click refresh to load datasets</p>
+            </div>
+        </div>
+        
         <!-- Debug Section -->
         <div class="control-section" id="debugSection">
             <button class="btn btn-secondary" id="debugBtn" style="display: none;">
@@ -541,6 +824,12 @@
     let currentFormat = null;
     let checkStatusInterval = null;
     let windAnimation = null;
+    let selectedFiles = [];
+    let batchCheckInterval = null;
+    let currentBatchId = null;
+    
+    // Constants
+    const MAX_BATCH_SIZE = {{ max_batch_size }};
     
     // Wind Animation Overlay Class for Client-Side Animation
     class WindAnimationOverlay {
@@ -796,6 +1085,12 @@
         
         // Set up event listeners
         setupEventListeners();
+        
+        // Check for active batches
+        checkActiveBatches();
+        
+        // Load datasets
+        loadDatasets();
     });
     
     // Load default wind visualization
@@ -872,7 +1167,7 @@
         document.getElementById('fileInput').addEventListener('change', handleFileSelect);
         
         // Upload button
-        document.getElementById('uploadBtn').addEventListener('click', uploadFile);
+        document.getElementById('uploadBtn').addEventListener('click', uploadFiles);
         
         // Tileset selector
         document.getElementById('tilesetSelector').addEventListener('change', handleTilesetChange);
@@ -889,32 +1184,510 @@
         document.getElementById('debugBtn').addEventListener('click', debugData);
     }
     
-    // Handle file selection
+    // Handle file selection (multi-file support)
     function handleFileSelect(event) {
-        const file = event.target.files[0];
-        if (file && file.name.endsWith('.nc')) {
-            document.getElementById('uploadBtn').style.display = 'block';
-            document.getElementById('uploadBtn').textContent = `⬆️ Upload ${file.name}`;
-            document.getElementById('vizTypeSelection').style.display = 'block';
-        } else {
-            showNotification('Please select a valid NetCDF (.nc) file', 'error');
-            event.target.value = '';
-        }
-    }
-    
-    // Upload file
-    async function uploadFile() {
-        const fileInput = document.getElementById('fileInput');
-        const file = fileInput.files[0];
+        const files = Array.from(event.target.files);
         
-        if (!file) {
-            showNotification('Please select a file first', 'error');
+        if (files.length === 0) return;
+        
+        // Validate files
+        const validFiles = files.filter(file => {
+            if (!file.name.endsWith('.nc')) {
+                showNotification(`Invalid file type: ${file.name}. Only NetCDF (.nc) files are allowed`, 'error');
+                return false;
+            }
+            return true;
+        });
+        
+        if (validFiles.length === 0) {
+            event.target.value = '';
             return;
         }
         
-        // Get selected visualization type
-        const vizType = document.querySelector('input[name="vizType"]:checked').value;
+        // Check batch size limit
+        if (validFiles.length > MAX_BATCH_SIZE) {
+            showNotification(`Too many files selected. Maximum batch size is ${MAX_BATCH_SIZE}`, 'error');
+            event.target.value = '';
+            return;
+        }
         
+        // Update selected files
+        selectedFiles = validFiles;
+        displaySelectedFiles();
+        
+        // Show upload options
+        document.getElementById('uploadBtn').style.display = 'block';
+        document.getElementById('clearFilesBtn').style.display = 'block';
+        document.getElementById('vizTypeSelection').style.display = 'block';
+        
+        if (selectedFiles.length > 1) {
+            document.getElementById('batchOptions').style.display = 'block';
+            document.getElementById('fileCount').textContent = selectedFiles.length;
+        } else {
+            document.getElementById('batchOptions').style.display = 'none';
+            document.getElementById('fileCount').textContent = '';
+        }
+    }
+    
+    // Display selected files
+    function displaySelectedFiles() {
+        const fileList = document.getElementById('fileList');
+        const fileItems = document.getElementById('fileItems');
+        
+        if (selectedFiles.length === 0) {
+            fileList.style.display = 'none';
+            return;
+        }
+        
+        fileList.style.display = 'block';
+        fileItems.innerHTML = '';
+        
+        selectedFiles.forEach((file, index) => {
+            const fileSize = (file.size / 1024 / 1024).toFixed(2);
+            const fileItem = document.createElement('div');
+            fileItem.className = 'file-item';
+            fileItem.innerHTML = `
+                <span class="file-name">${file.name}</span>
+                <span class="file-size">${fileSize} MB</span>
+                <span class="remove-file" onclick="removeFile(${index})">×</span>
+            `;
+            fileItems.appendChild(fileItem);
+        });
+    }
+    
+    // Remove file from selection
+    function removeFile(index) {
+        selectedFiles.splice(index, 1);
+        displaySelectedFiles();
+        
+        if (selectedFiles.length === 0) {
+            clearSelectedFiles();
+        } else {
+            document.getElementById('fileCount').textContent = selectedFiles.length;
+        }
+    }
+    
+    // Clear selected files
+    function clearSelectedFiles() {
+        selectedFiles = [];
+        document.getElementById('fileInput').value = '';
+        document.getElementById('fileList').style.display = 'none';
+        document.getElementById('uploadBtn').style.display = 'none';
+        document.getElementById('clearFilesBtn').style.display = 'none';
+        document.getElementById('vizTypeSelection').style.display = 'none';
+        document.getElementById('batchOptions').style.display = 'none';
+    }
+    
+    // Upload files (single or batch)
+    async function uploadFiles() {
+        if (selectedFiles.length === 0) {
+            showNotification('Please select files first', 'error');
+            return;
+        }
+        
+        // Get selected upload type
+        const uploadType = document.querySelector('input[name="uploadType"]:checked').value;
+        
+        // Get selected visualization type (for tilesets)
+        const vizType = document.querySelector('input[name="vizType"]:checked').value;
+        const mergeFiles = document.getElementById('mergeFiles').checked;
+        
+        // Hide upload button and show progress
+        document.getElementById('uploadBtn').style.display = 'none';
+        document.getElementById('clearFilesBtn').style.display = 'none';
+        
+        if (uploadType === 'dataset') {
+            // Upload as datasets only
+            if (selectedFiles.length === 1) {
+                await uploadSingleFileAsDataset(selectedFiles[0]);
+            } else {
+                await uploadBatchAsDatasets(selectedFiles);
+            }
+        } else if (uploadType === 'both') {
+            // Upload as both tilesets and datasets
+            showNotification('📦 Creating both tilesets and datasets...', 'info');
+            
+            // Start both processes
+            const promises = [];
+            
+            if (selectedFiles.length === 1) {
+                promises.push(uploadSingleFile(selectedFiles[0], vizType));
+                promises.push(uploadSingleFileAsDataset(selectedFiles[0]));
+            } else {
+                promises.push(uploadBatch(selectedFiles, vizType, mergeFiles));
+                promises.push(uploadBatchAsDatasets(selectedFiles));
+            }
+            
+            await Promise.all(promises);
+        } else {
+            // Default: upload as tilesets
+            if (selectedFiles.length === 1) {
+                await uploadSingleFile(selectedFiles[0], vizType);
+            } else {
+                await uploadBatch(selectedFiles, vizType, mergeFiles);
+            }
+        }
+    }
+    
+    // Upload single file as dataset
+    async function uploadSingleFileAsDataset(file) {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        // Show progress
+        document.getElementById('progressContainer').style.display = 'block';
+        updateProgress(10, 'Uploading file for dataset creation...');
+        
+        try {
+            const response = await fetch('/api/upload-netcdf-as-dataset', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Upload failed: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                updateProgress(50, 'Creating Mapbox dataset...');
+                showNotification('📊 File uploaded! Creating dataset...', 'info');
+                
+                // Check dataset status
+                checkDatasetStatus(result.job_id);
+            } else {
+                throw new Error(result.error || 'Upload failed');
+            }
+            
+        } catch (error) {
+            console.error('Dataset upload error:', error);
+            showNotification('❌ Dataset creation failed: ' + error.message, 'error');
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('uploadBtn').style.display = 'block';
+            document.getElementById('clearFilesBtn').style.display = 'block';
+        }
+    }
+    
+    // Upload batch as datasets
+    async function uploadBatchAsDatasets(files) {
+        const formData = new FormData();
+        
+        // Add all files
+        files.forEach(file => {
+            formData.append('files', file);
+        });
+        
+        // Show batch progress
+        document.getElementById('batchProgress').style.display = 'block';
+        updateBatchProgress(0, files.length, 0, 0);
+        
+        try {
+            const response = await fetch('/api/upload-netcdf-batch-as-datasets', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Batch dataset upload failed: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.batch_id) {
+                currentBatchId = result.batch_id;
+                showNotification(`📦 Creating datasets for ${files.length} files...`, 'info');
+                
+                // Display batch results
+                displayBatchDatasetResults(result);
+                
+                // Start checking batch status
+                checkBatchDatasetStatus(result.batch_id);
+            }
+            
+        } catch (error) {
+            console.error('Batch dataset upload error:', error);
+            showNotification('❌ Batch dataset creation failed: ' + error.message, 'error');
+            document.getElementById('batchProgress').style.display = 'none';
+            document.getElementById('uploadBtn').style.display = 'block';
+            document.getElementById('clearFilesBtn').style.display = 'block';
+        }
+    }
+    
+    // Check dataset creation status
+    async function checkDatasetStatus(jobId) {
+        let checkCount = 0;
+        const maxChecks = 60; // 5 minutes max
+        
+        const checkInterval = setInterval(async () => {
+            try {
+                checkCount++;
+                
+                const response = await fetch(`/api/dataset-status/${jobId}`);
+                const status = await response.json();
+                
+                if (status.status === 'completed') {
+                    clearInterval(checkInterval);
+                    updateProgress(100, 'Dataset created successfully!');
+                    
+                    showNotification(`✅ Dataset created: ${status.dataset_id}`, 'success');
+                    
+                    // Show dataset info
+                    displayDatasetResult(status);
+                    
+                    // Refresh dataset list
+                    setTimeout(() => loadDatasets(), 1000);
+                    
+                    // Clear UI
+                    setTimeout(() => {
+                        document.getElementById('progressContainer').style.display = 'none';
+                        clearSelectedFiles();
+                    }, 3000);
+                    
+                } else if (status.status === 'failed') {
+                    clearInterval(checkInterval);
+                    updateProgress(0, 'Dataset creation failed');
+                    showNotification('❌ Dataset creation failed: ' + status.error, 'error');
+                    
+                    setTimeout(() => {
+                        document.getElementById('progressContainer').style.display = 'none';
+                        clearSelectedFiles();
+                    }, 3000);
+                    
+                } else {
+                    updateProgress(75, 'Processing features...');
+                }
+                
+                if (checkCount >= maxChecks) {
+                    clearInterval(checkInterval);
+                    showNotification('⏱️ Dataset creation is taking longer than expected.', 'warning');
+                }
+            } catch (error) {
+                clearInterval(checkInterval);
+                showNotification('❌ Status check failed', 'error');
+                document.getElementById('progressContainer').style.display = 'none';
+            }
+        }, 5000);
+    }
+    
+    // Check batch dataset status
+    async function checkBatchDatasetStatus(batchId) {
+        let checkCount = 0;
+        const maxChecks = 60;
+        
+        const checkInterval = setInterval(async () => {
+            try {
+                checkCount++;
+                
+                const response = await fetch(`/api/batch-status/${batchId}`);
+                const status = await response.json();
+                
+                // Update progress
+                updateBatchProgress(
+                    status.processed_files || 0,
+                    status.total_files,
+                    status.datasets?.length || 0,
+                    status.errors?.length || 0
+                );
+                
+                if (status.status === 'completed' || status.status === 'failed' || status.status === 'partial') {
+                    clearInterval(checkInterval);
+                    
+                    if (status.status === 'completed') {
+                        showNotification(`✅ All datasets created successfully!`, 'success');
+                    } else if (status.status === 'partial') {
+                        showNotification(`⚠️ Some datasets created, some failed.`, 'warning');
+                    } else {
+                        showNotification('❌ Dataset creation failed.', 'error');
+                    }
+                    
+                    // Refresh dataset list
+                    setTimeout(() => loadDatasets(), 1000);
+                    
+                    // Clear UI
+                    setTimeout(() => {
+                        document.getElementById('batchProgress').style.display = 'none';
+                        clearSelectedFiles();
+                    }, 3000);
+                }
+                
+                if (checkCount >= maxChecks) {
+                    clearInterval(checkInterval);
+                    showNotification('⏱️ Batch processing is taking longer than expected.', 'warning');
+                }
+            } catch (error) {
+                clearInterval(checkInterval);
+                showNotification('❌ Batch status check failed', 'error');
+            }
+        }, 5000);
+    }
+    
+    // Display single dataset result
+    function displayDatasetResult(datasetInfo) {
+        const uploadResults = document.getElementById('uploadResults');
+        uploadResults.style.display = 'block';
+        
+        const summaryTab = document.getElementById('summaryTab');
+        let html = '<div style="color: white; font-size: 14px;">';
+        html += '<h5>Dataset Created Successfully</h5>';
+        html += `<p><strong>Dataset ID:</strong> ${datasetInfo.dataset_id}</p>`;
+        html += `<p><strong>Features:</strong> ${datasetInfo.features_added} points</p>`;
+        html += `<p><strong>Studio URL:</strong> <a href="${datasetInfo.dataset_url}" target="_blank" style="color: #60a5fa;">Open in Mapbox Studio</a></p>`;
+        html += '</div>';
+        
+        summaryTab.innerHTML = html;
+    }
+    
+    // Display batch dataset results
+    function displayBatchDatasetResults(batchData) {
+        const uploadResults = document.getElementById('uploadResults');
+        uploadResults.style.display = 'block';
+        
+        const summaryTab = document.getElementById('summaryTab');
+        let html = '<div style="color: white; font-size: 14px;">';
+        html += '<h5>Dataset Batch Processing</h5>';
+        html += `<p><strong>Batch ID:</strong> ${batchData.batch_id}</p>`;
+        html += `<p><strong>Total Files:</strong> ${batchData.total_files}</p>`;
+        html += `<p><strong>Type:</strong> Feature Collection Datasets</p>`;
+        html += '</div>';
+        
+        summaryTab.innerHTML = html;
+    }
+    
+    // Load and display datasets
+    async function loadDatasets() {
+        const datasetsList = document.getElementById('datasetsList');
+        datasetsList.innerHTML = '<p style="text-align: center;">Loading datasets...</p>';
+        
+        try {
+            const response = await fetch('/api/list-datasets');
+            const result = await response.json();
+            
+            if (result.success) {
+                if (result.weather_datasets.length === 0) {
+                    datasetsList.innerHTML = '<p style="color: #9ca3af; text-align: center;">No weather datasets found</p>';
+                } else {
+                    datasetsList.innerHTML = '';
+                    
+                    result.weather_datasets.forEach(dataset => {
+                        const datasetItem = createDatasetItem(dataset);
+                        datasetsList.appendChild(datasetItem);
+                    });
+                }
+                
+                showNotification(`Found ${result.weather_datasets.length} weather datasets`, 'info');
+            } else {
+                throw new Error('Failed to load datasets');
+            }
+            
+        } catch (error) {
+            console.error('Error loading datasets:', error);
+            datasetsList.innerHTML = '<p style="color: #ef4444; text-align: center;">Failed to load datasets</p>';
+            showNotification('❌ Failed to load datasets', 'error');
+        }
+    }
+    
+    // Create dataset item UI
+    function createDatasetItem(dataset) {
+        const div = document.createElement('div');
+        div.className = 'dataset-item';
+        
+        const created = new Date(dataset.created).toLocaleDateString();
+        const modified = new Date(dataset.modified).toLocaleDateString();
+        
+        div.innerHTML = `
+            <div class="dataset-info">
+                <div class="dataset-details">
+                    <div class="dataset-name">
+                        ${dataset.name || dataset.id}
+                        <span class="dataset-badge">Dataset</span>
+                    </div>
+                    <div class="dataset-meta">
+                        ID: ${dataset.id}<br>
+                        Created: ${created} | Modified: ${modified}
+                    </div>
+                </div>
+                <div class="dataset-actions">
+                    <button class="btn btn-small btn-secondary" onclick="viewDatasetInfo('${dataset.id}')">
+                        ℹ️ Info
+                    </button>
+                    <button class="btn btn-small btn-secondary" onclick="openInStudio('${dataset.id}')">
+                        🗺️ Studio
+                    </button>
+                    <button class="btn btn-small btn-danger" onclick="deleteDataset('${dataset.id}')">
+                        🗑️
+                    </button>
+                </div>
+            </div>
+        `;
+        
+        return div;
+    }
+    
+    // View dataset info
+    async function viewDatasetInfo(datasetId) {
+        try {
+            const response = await fetch(`/api/dataset-info/${datasetId}`);
+            const info = await response.json();
+            
+            // Create modal or display info
+            let infoHtml = '<div style="background: rgba(0,0,0,0.9); padding: 20px; border-radius: 8px; max-width: 500px; margin: 20px auto;">';
+            infoHtml += `<h3>Dataset Information</h3>`;
+            infoHtml += `<p><strong>ID:</strong> ${info.id}</p>`;
+            infoHtml += `<p><strong>Name:</strong> ${info.name || 'Unnamed'}</p>`;
+            infoHtml += `<p><strong>Owner:</strong> ${info.owner}</p>`;
+            infoHtml += `<p><strong>Created:</strong> ${new Date(info.created).toLocaleString()}</p>`;
+            infoHtml += `<p><strong>Modified:</strong> ${new Date(info.modified).toLocaleString()}</p>`;
+            infoHtml += `<p><strong>Size:</strong> ${info.size || 'Unknown'} bytes</p>`;
+            infoHtml += `<button class="btn btn-secondary" onclick="this.parentElement.remove()">Close</button>`;
+            infoHtml += '</div>';
+            
+            // Create temporary modal
+            const modal = document.createElement('div');
+            modal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 3000; display: flex; align-items: center; justify-content: center;';
+            modal.innerHTML = infoHtml;
+            modal.onclick = (e) => {
+                if (e.target === modal) modal.remove();
+            };
+            document.body.appendChild(modal);
+            
+        } catch (error) {
+            console.error('Error getting dataset info:', error);
+            showNotification('❌ Failed to get dataset info', 'error');
+        }
+    }
+    
+    // Open dataset in Mapbox Studio
+    function openInStudio(datasetId) {
+        const studioUrl = `https://studio.mapbox.com/datasets/${datasetId}/`;
+        window.open(studioUrl, '_blank');
+    }
+    
+    // Delete dataset
+    async function deleteDataset(datasetId) {
+        if (!confirm('Are you sure you want to delete this dataset?')) return;
+        
+        try {
+            const response = await fetch(`/api/dataset/${datasetId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                showNotification('✅ Dataset deleted successfully', 'success');
+                // Refresh dataset list
+                loadDatasets();
+            } else {
+                throw new Error('Failed to delete dataset');
+            }
+            
+        } catch (error) {
+            console.error('Error deleting dataset:', error);
+            showNotification('❌ Failed to delete dataset', 'error');
+        }
+    }
+    
+    // Upload single file
+    async function uploadSingleFile(file, vizType) {
         const formData = new FormData();
         formData.append('file', file);
         formData.append('create_tileset', 'true');
@@ -922,7 +1695,6 @@
         
         // Show progress
         document.getElementById('progressContainer').style.display = 'block';
-        document.getElementById('uploadBtn').style.display = 'none';
         updateProgress(10, 'Uploading file...');
         
         try {
@@ -943,8 +1715,8 @@
                 updateProgress(50, 'Processing NetCDF...');
                 showNotification('📊 File uploaded successfully! Processing...', 'info');
                 
-                // Display file metadata immediately
-                displayFileMetadata(result);
+                // Display file metadata
+                displaySingleFileResult(result);
                 
                 // Store session ID for client-side animation
                 if (result.session_id) {
@@ -962,15 +1734,74 @@
             showNotification('❌ Upload failed: ' + error.message, 'error');
             document.getElementById('progressContainer').style.display = 'none';
             document.getElementById('uploadBtn').style.display = 'block';
-            document.getElementById('vizTypeSelection').style.display = 'block';
+            document.getElementById('clearFilesBtn').style.display = 'block';
         }
     }
     
-    // Display file metadata
-    function displayFileMetadata(data) {
-        const metadataDiv = document.getElementById('fileMetadata');
+    // Upload batch
+    async function uploadBatch(files, vizType, mergeFiles) {
+        const formData = new FormData();
         
+        // Add all files
+        files.forEach(file => {
+            formData.append('files', file);
+        });
+        
+        formData.append('create_tileset', 'true');
+        formData.append('visualization_type', vizType);
+        formData.append('merge_files', mergeFiles);
+        
+        // Show batch progress
+        document.getElementById('batchProgress').style.display = 'block';
+        updateBatchProgress(0, files.length, 0, 0);
+        
+        try {
+            const response = await fetch('/api/upload-netcdf-batch', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Batch upload response error:', errorText);
+                throw new Error(`Batch upload failed: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.batch_id) {
+                currentBatchId = result.batch_id;
+                showNotification(`📦 Batch upload started. Processing ${files.length} files...`, 'info');
+                
+                // Display batch results
+                displayBatchResults(result);
+                
+                // Start checking batch status
+                checkBatchStatus(result.batch_id);
+                
+                // Add to active batches
+                addActiveBatch(result);
+            } else {
+                throw new Error('No batch ID returned');
+            }
+            
+        } catch (error) {
+            console.error('Batch upload error:', error);
+            showNotification('❌ Batch upload failed: ' + error.message, 'error');
+            document.getElementById('batchProgress').style.display = 'none';
+            document.getElementById('uploadBtn').style.display = 'block';
+            document.getElementById('clearFilesBtn').style.display = 'block';
+        }
+    }
+    
+    // Display single file result
+    function displaySingleFileResult(data) {
+        const uploadResults = document.getElementById('uploadResults');
+        uploadResults.style.display = 'block';
+        
+        const summaryTab = document.getElementById('summaryTab');
         let html = '<div style="color: white; font-size: 14px;">';
+        html += `<p><strong>File:</strong> ${data.filename || 'Uploaded file'}</p>`;
         html += `<p><strong>Variables:</strong> ${data.metadata.variables.length}</p>`;
         
         if (data.scalar_vars && data.scalar_vars.length > 0) {
@@ -991,12 +1822,272 @@
         }
         
         html += '</div>';
-        metadataDiv.innerHTML = html;
+        summaryTab.innerHTML = html;
         
-        document.getElementById('uploadResult').style.display = 'block';
+        document.getElementById('progressContainer').style.display = 'none';
     }
     
-    // Check processing status
+    // Display batch results
+    function displayBatchResults(batchData) {
+        const uploadResults = document.getElementById('uploadResults');
+        uploadResults.style.display = 'block';
+        
+        const summaryTab = document.getElementById('summaryTab');
+        const detailsTab = document.getElementById('detailsTab');
+        
+        // Summary
+        let summaryHtml = '<div style="color: white; font-size: 14px;">';
+        summaryHtml += `<p><strong>Batch ID:</strong> ${batchData.batch_id}</p>`;
+        summaryHtml += `<p><strong>Total Files:</strong> ${batchData.total_files}</p>`;
+        summaryHtml += `<p><strong>Status:</strong> <span id="batchStatusText">${batchData.status}</span></p>`;
+        summaryHtml += '</div>';
+        
+        // File list
+        summaryHtml += '<div class="file-list" style="margin-top: 15px;">';
+        batchData.files.forEach(file => {
+            const status = file.success ? 'completed' : 'failed';
+            summaryHtml += `
+                <div class="file-item">
+                    <span class="file-name">${file.filename}</span>
+                    <span class="file-status ${status}">${status}</span>
+                </div>
+            `;
+        });
+        summaryHtml += '</div>';
+        
+        summaryTab.innerHTML = summaryHtml;
+        
+        // Details (individual file results)
+        let detailsHtml = '';
+        batchData.files.forEach(file => {
+            if (file.success) {
+                detailsHtml += `<div style="margin-bottom: 20px; padding: 15px; background: rgba(255,255,255,0.05); border-radius: 6px;">`;
+                detailsHtml += `<h5>${file.filename}</h5>`;
+                if (file.metadata) {
+                    detailsHtml += `<p>Variables: ${file.metadata.variables.length}</p>`;
+                }
+                if (file.wind_components) {
+                    detailsHtml += `<p>Wind fields found: ${file.wind_components.u}, ${file.wind_components.v}</p>`;
+                }
+                detailsHtml += '</div>';
+            }
+        });
+        
+        if (batchData.errors.length > 0) {
+            detailsHtml += '<div style="margin-top: 20px;"><h5 style="color: #ef4444;">Errors:</h5>';
+            batchData.errors.forEach(error => {
+                detailsHtml += `<p style="color: #f87171;">${error.filename}: ${error.error}</p>`;
+            });
+            detailsHtml += '</div>';
+        }
+        
+        detailsTab.innerHTML = detailsHtml;
+    }
+    
+    // Check batch status
+    async function checkBatchStatus(batchId) {
+        let checkCount = 0;
+        const maxChecks = 120; // 10 minutes max
+        
+        // Clear any existing interval
+        if (batchCheckInterval) {
+            clearInterval(batchCheckInterval);
+        }
+        
+        batchCheckInterval = setInterval(async () => {
+            try {
+                checkCount++;
+                
+                const response = await fetch(`/api/batch-status/${batchId}`);
+                const status = await response.json();
+                
+                // Update progress
+                updateBatchProgress(
+                    status.processed_files || 0,
+                    status.total_files,
+                    status.completed_files || 0,
+                    status.failed_files || 0
+                );
+                
+                // Update status text
+                const statusText = document.getElementById('batchStatusText');
+                if (statusText) {
+                    statusText.textContent = status.status;
+                }
+                
+                if (status.status === 'completed' || status.status === 'failed') {
+                    clearInterval(batchCheckInterval);
+                    completeBatchUpload(status);
+                } else if (status.status === 'partial') {
+                    // Continue checking but show partial completion
+                    showNotification('⚠️ Some files completed, others still processing...', 'warning');
+                }
+                
+                if (checkCount >= maxChecks) {
+                    clearInterval(batchCheckInterval);
+                    showNotification('⏱️ Batch processing is taking longer than expected.', 'warning');
+                }
+            } catch (error) {
+                clearInterval(batchCheckInterval);
+                showNotification('❌ Batch status check failed', 'error');
+            }
+        }, 5000); // Check every 5 seconds
+    }
+    
+    // Update batch progress
+    function updateBatchProgress(processed, total, completed, failed) {
+        const progress = total > 0 ? Math.round((processed / total) * 100) : 0;
+        
+        document.getElementById('batchProgressFill').style.width = `${progress}%`;
+        document.getElementById('batchProgressFill').textContent = `${progress}%`;
+        
+        document.getElementById('batchTotal').textContent = total;
+        document.getElementById('batchCompleted').textContent = completed;
+        document.getElementById('batchFailed').textContent = failed;
+    }
+    
+    // Complete batch upload
+    function completeBatchUpload(status) {
+        if (status.status === 'completed') {
+            showNotification(`✅ Batch processing completed! All ${status.total_files} files processed.`, 'success');
+        } else if (status.status === 'partial') {
+            showNotification(`⚠️ Batch partially completed. ${status.completed_files} succeeded, ${status.failed_files} failed.`, 'warning');
+        } else {
+            showNotification('❌ Batch processing failed.', 'error');
+        }
+        
+        // Update tileset selector with new tilesets
+        updateTilesetSelector();
+        
+        // Clear batch progress after delay
+        setTimeout(() => {
+            document.getElementById('batchProgress').style.display = 'none';
+            clearSelectedFiles();
+        }, 3000);
+    }
+    
+    // Add active batch to list
+    function addActiveBatch(batchData) {
+        const activeBatches = document.getElementById('activeBatches');
+        const batchJobsList = document.getElementById('batchJobsList');
+        
+        activeBatches.style.display = 'block';
+        
+        const batchItem = document.createElement('div');
+        batchItem.id = `batch-${batchData.batch_id}`;
+        batchItem.className = 'file-item';
+        batchItem.innerHTML = `
+            <div>
+                <strong>Batch ${batchData.batch_id.substring(0, 8)}...</strong><br>
+                <small>${batchData.total_files} files - <span class="batch-status-${batchData.batch_id}">${batchData.status}</span></small>
+            </div>
+            <button class="btn btn-small btn-danger" onclick="deleteBatch('${batchData.batch_id}')">
+                Delete
+            </button>
+        `;
+        
+        batchJobsList.appendChild(batchItem);
+    }
+    
+    // Check for active batches on load
+    async function checkActiveBatches() {
+        try {
+            const response = await fetch('/api/active-visualizations');
+            const data = await response.json();
+            
+            if (data.batch_jobs && Object.keys(data.batch_jobs).length > 0) {
+                const activeBatches = document.getElementById('activeBatches');
+                const batchJobsList = document.getElementById('batchJobsList');
+                
+                activeBatches.style.display = 'block';
+                batchJobsList.innerHTML = '';
+                
+                for (const [batchId, batchData] of Object.entries(data.batch_jobs)) {
+                    const batchItem = document.createElement('div');
+                    batchItem.id = `batch-${batchId}`;
+                    batchItem.className = 'file-item';
+                    batchItem.innerHTML = `
+                        <div>
+                            <strong>Batch ${batchId.substring(0, 8)}...</strong><br>
+                            <small>${batchData.total_files} files - <span class="batch-status-${batchId}">${batchData.status}</span></small>
+                        </div>
+                        <button class="btn btn-small btn-danger" onclick="deleteBatch('${batchId}')">
+                            Delete
+                        </button>
+                    `;
+                    
+                    batchJobsList.appendChild(batchItem);
+                    
+                    // Check status if still processing
+                    if (batchData.status === 'processing') {
+                        checkBatchStatus(batchId);
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Error checking active batches:', error);
+        }
+    }
+    
+    // Delete batch
+    async function deleteBatch(batchId) {
+        if (!confirm('Delete all files in this batch?')) return;
+        
+        try {
+            const response = await fetch(`/api/batch/${batchId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                showNotification(`✅ Batch deleted. ${result.deleted_count} files removed.`, 'success');
+                
+                // Remove from UI
+                const batchItem = document.getElementById(`batch-${batchId}`);
+                if (batchItem) {
+                    batchItem.remove();
+                }
+                
+                // Hide section if no more batches
+                const batchJobsList = document.getElementById('batchJobsList');
+                if (batchJobsList.children.length === 0) {
+                    document.getElementById('activeBatches').style.display = 'none';
+                }
+                
+                // Update tileset selector
+                updateTilesetSelector();
+            } else {
+                showNotification('❌ Failed to delete batch', 'error');
+            }
+        } catch (error) {
+            console.error('Error deleting batch:', error);
+            showNotification('❌ Error deleting batch', 'error');
+        }
+    }
+    
+    // Update tileset selector
+    async function updateTilesetSelector() {
+        // This would typically refresh the page or fetch updated tileset list
+        // For now, we'll just reload the page
+        location.reload();
+    }
+    
+    // Switch tabs
+    function switchTab(tabName) {
+        // Update active tab
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.classList.remove('active');
+        });
+        event.target.classList.add('active');
+        
+        // Show/hide content
+        document.querySelectorAll('.tab-content').forEach(content => {
+            content.classList.remove('active');
+        });
+        document.getElementById(`${tabName}Tab`).classList.add('active');
+    }
+    
+    // Check processing status (existing function, unchanged)
     async function checkProcessingStatus(jobId, vizType) {
         let checkCount = 0;
         const maxChecks = 120; // 10 minutes max (5 second intervals)
@@ -1032,6 +2123,7 @@
                         document.getElementById('progressContainer').style.display = 'none';
                         document.getElementById('vizTypeSelection').style.display = 'none';
                         document.getElementById('fileInput').value = '';
+                        clearSelectedFiles();
                     }, 3000);
                     
                 } else {
@@ -1054,11 +2146,12 @@
                 showNotification('❌ Status check failed', 'error');
                 document.getElementById('progressContainer').style.display = 'none';
                 document.getElementById('vizTypeSelection').style.display = 'none';
+                clearSelectedFiles();
             }
         }, 5000); // Check every 5 seconds
     }
     
-    // Complete the upload process
+    // Complete the upload process (existing function, unchanged)
     function completeUpload(status) {
         updateProgress(100, 'Upload complete!');
         showNotification('✅ NetCDF file processed successfully!', 'success');
@@ -1091,10 +2184,12 @@
             option.setAttribute('data-source-layer', status.source_layer || (actualFormat === 'raster-array' ? '10winds' : 'weather_data'));
             option.setAttribute('data-session-id', status.session_id || '');
             option.setAttribute('data-use-client-animation', status.use_client_animation ? 'true' : 'false');
+            option.setAttribute('data-batch-id', status.batch_id || '');
             
             // Add format indicator to the option text
             const formatIndicator = actualFormat === 'raster-array' ? '🎬' : '📍';
-            option.textContent = `${formatIndicator} Uploaded: ${status.tileset_id}`;
+            const batchIndicator = status.batch_id ? ' [Batch]' : '';
+            option.textContent = `${formatIndicator} Uploaded: ${status.tileset_id}${batchIndicator}`;
             
             selector.appendChild(option);
         }
@@ -1128,9 +2223,10 @@
             document.getElementById('progressContainer').style.display = 'none';
             document.getElementById('vizTypeSelection').style.display = 'none';
             document.getElementById('fileInput').value = '';
+            clearSelectedFiles();
             
             // Hide file analysis
-            const uploadResult = document.getElementById('uploadResult');
+            const uploadResult = document.getElementById('uploadResults');
             if (uploadResult) {
                 uploadResult.style.display = 'none';
             }
@@ -1209,8 +2305,9 @@
         const sourceLayer = selectedOption.getAttribute('data-source-layer') || (actualFormat === 'raster-array' ? '10winds' : 'weather_data');
         const sessionId = selectedOption.getAttribute('data-session-id') || '';
         const useClientAnimation = selectedOption.getAttribute('data-use-client-animation') === 'true';
+        const batchId = selectedOption.getAttribute('data-batch-id') || '';
         
-        console.log(`Loading tileset: ${tilesetId}, actual format: ${actualFormat}, requested: ${requestedFormat}, session: ${sessionId}, client animation: ${useClientAnimation}`);
+        console.log(`Loading tileset: ${tilesetId}, actual format: ${actualFormat}, requested: ${requestedFormat}, session: ${sessionId}, client animation: ${useClientAnimation}, batch: ${batchId}`);
         
         // Clear existing visualization
         clearWindVisualization();
@@ -1227,7 +2324,8 @@
         } else {
             // Load regular tileset
             const formatText = actualFormat === 'raster-array' ? 'animation' : 'static';
-            showNotification(`🚀 Loading ${formatText} visualization...`, 'info');
+            const batchText = batchId ? ' (from batch)' : '';
+            showNotification(`🚀 Loading ${formatText} visualization${batchText}...`, 'info');
             
             try {
                 if (tilesetId === '{{ default_tileset.id }}') {
@@ -1655,10 +2753,15 @@
     function clearWindVisualization() {
         showNotification('🧹 Clearing visualization...', 'info');
         
-        // Clear any status check interval
+        // Clear any status check intervals
         if (checkStatusInterval) {
             clearInterval(checkStatusInterval);
             checkStatusInterval = null;
+        }
+        
+        if (batchCheckInterval) {
+            clearInterval(batchCheckInterval);
+            batchCheckInterval = null;
         }
         
         // Clear all layers
@@ -1671,6 +2774,7 @@
         
         currentTilesetId = null;
         currentVisualizationType = null;
+        currentBatchId = null;
         
         showNotification('✅ Visualization cleared', 'success');
     }

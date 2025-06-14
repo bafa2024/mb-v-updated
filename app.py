@@ -1,4 +1,4 @@
-# app.py - Weather Visualization Application with Region-Focused Animation
+# app.py - Weather Visualization Application with Multi-file Upload Support
 from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,13 +12,15 @@ import json
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import aiofiles
 from datetime import datetime
 import logging
 import asyncio
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
+import uuid
 
 # Fix for Windows path issues
 if sys.platform == "win32":
@@ -32,6 +34,7 @@ load_dotenv()
 # Import modules
 from tileset_management import MapboxTilesetManager
 from mts_raster_manager import MTSRasterManager
+from mapbox_dataset_manager import MapboxDatasetManager
 
 # Configure logging
 logging.basicConfig(
@@ -41,7 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Create FastAPI app
-app = FastAPI(title="Weather Visualization Platform", version="4.0.0")
+app = FastAPI(title="Weather Visualization Platform", version="5.0.0")
 
 # Enable CORS
 app.add_middleware(
@@ -61,6 +64,7 @@ class Config:
     STATIC_DIR = BASE_DIR / "static"
     TEMPLATES_DIR = BASE_DIR / "templates"
     MAX_FILE_SIZE = int(os.getenv("MAX_UPLOAD_SIZE", "500")) * 1024 * 1024  # MB to bytes
+    MAX_BATCH_SIZE = int(os.getenv("MAX_BATCH_SIZE", "10"))  # Maximum files in one batch
     
     # Load Mapbox credentials
     MAPBOX_USERNAME = os.getenv("MAPBOX_USERNAME", "")
@@ -101,9 +105,22 @@ class ProcessingStatus(BaseModel):
     visualization_url: Optional[str] = None
     error: Optional[str] = None
 
+class BatchProcessingStatus(BaseModel):
+    batch_id: str
+    total_files: int
+    processed_files: int
+    status: str
+    files: List[Dict[str, any]]
+    errors: List[Dict[str, str]]
+
 # In-memory storage
 active_visualizations = {}
 active_sessions = {}  # Store session data for client-side animation
+batch_jobs = {}  # Store batch processing jobs
+active_datasets = {}  # Store dataset information
+
+# Thread pool for parallel processing
+executor = ThreadPoolExecutor(max_workers=4)
 
 # Default weather tileset
 DEFAULT_TILESET = {
@@ -157,9 +174,10 @@ async def main_page(request: Request):
                                 tileset_info['session_id'] = recipe_data.get('session_id')
                                 tileset_info['requested_format'] = recipe_data.get('requested_format', 'vector')
                                 tileset_info['use_client_animation'] = recipe_data.get('use_client_animation', False)
-                                tileset_info['bounds'] = recipe_data.get('bounds')  # Add bounds info
-                                tileset_info['center'] = recipe_data.get('center')  # Add center info
-                                tileset_info['zoom'] = recipe_data.get('zoom')      # Add zoom info
+                                tileset_info['bounds'] = recipe_data.get('bounds')
+                                tileset_info['center'] = recipe_data.get('center')
+                                tileset_info['zoom'] = recipe_data.get('zoom')
+                                tileset_info['batch_id'] = recipe_data.get('batch_id')  # Add batch info
                         except:
                             tileset_info['format'] = 'vector'
                     else:
@@ -181,7 +199,8 @@ async def main_page(request: Request):
         "mapbox_token": Config.MAPBOX_PUBLIC_TOKEN,
         "mapbox_username": Config.MAPBOX_USERNAME,
         "available_tilesets": available_tilesets,
-        "default_tileset": DEFAULT_TILESET
+        "default_tileset": DEFAULT_TILESET,
+        "max_batch_size": Config.MAX_BATCH_SIZE
     })
 
 @app.post("/api/upload-netcdf")
@@ -192,7 +211,7 @@ async def upload_netcdf(
     tileset_name: Optional[str] = Form(None),
     visualization_type: str = Form("vector")
 ):
-    """Upload and process NetCDF file"""
+    """Upload and process single NetCDF file (backward compatibility)"""
     
     # Validate file
     if not file.filename.endswith('.nc'):
@@ -208,79 +227,223 @@ async def upload_netcdf(
     # Create job
     job_id = datetime.now().strftime("%Y%m%d%H%M%S")
     
-    # Sanitize filename
-    safe_filename = Path(file.filename).name
-    safe_filename = ''.join(c if c.isalnum() or c in '.-_' else '_' for c in safe_filename)
-    if not safe_filename.endswith('.nc'):
-        safe_filename = safe_filename.rsplit('.', 1)[0] + '.nc'
+    # Process single file using the same logic as batch with one file
+    files = [{"file": file, "content": content}]
+    result = await process_batch_upload(
+        files=files,
+        job_ids=[job_id],
+        create_tileset=create_tileset,
+        tileset_names=[tileset_name] if tileset_name else None,
+        visualization_type=visualization_type,
+        background_tasks=background_tasks
+    )
     
-    # Save uploaded file - use Path properly
-    file_path = Config.UPLOAD_DIR / f"{job_id}_{safe_filename}"
-    
-    # Ensure upload directory exists
-    Config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    
-    logger.info(f"Saving uploaded file: {file_path}")
-    
-    try:
-        async with aiofiles.open(str(file_path), 'wb') as f:
-            await f.write(content)
-    except Exception as e:
-        logger.error(f"Failed to save file: {e}")
-        raise HTTPException(500, "Failed to save uploaded file")
-    
-    # Process file
-    try:
-        # Analyze file
-        result = await process_netcdf_file(
-            file_path, job_id, create_tileset, tileset_name, visualization_type
-        )
-        
-        # Store session data for client-side animation
-        if result.get('wind_data'):
-            active_sessions[job_id] = {
-                'file_path': str(file_path),
-                'wind_data': result['wind_data'],
-                'bounds': result.get('bounds'),
-                'center': result.get('center'),
-                'zoom': result.get('zoom'),
-                'created_at': datetime.now().isoformat()
-            }
-            result['session_id'] = job_id
-        
-        if create_tileset and Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
-            # Start background tileset creation
-            background_tasks.add_task(
-                create_mapbox_tileset_background,
-                file_path,
-                job_id,
-                result.get('tileset_id'),
-                visualization_type
-            )
-            
-            result['status'] = 'processing'
-            result['message'] = 'File uploaded successfully. Creating Mapbox tileset...'
-        
-        return JSONResponse(result)
-        
-    except Exception as e:
-        logger.error(f"Error processing file: {str(e)}")
-        logger.error(traceback.format_exc())
-        
-        # Clean up file on error
-        if file_path.exists():
-            try:
-                file_path.unlink()
-            except:
-                pass
-                
+    # Return single file result
+    if result['files']:
+        return JSONResponse(result['files'][0])
+    else:
         return JSONResponse({
             "success": False,
-            "error": str(e)
+            "error": "Failed to process file"
         }, status_code=500)
 
+@app.post("/api/upload-netcdf-batch")
+async def upload_netcdf_batch(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    create_tileset: bool = Form(True),
+    tileset_names: Optional[str] = Form(None),  # Comma-separated names
+    visualization_type: str = Form("vector"),
+    merge_files: bool = Form(False)  # Option to merge files into single tileset
+):
+    """Upload and process multiple NetCDF files"""
+    
+    # Validate batch size
+    if len(files) > Config.MAX_BATCH_SIZE:
+        raise HTTPException(400, f"Too many files. Maximum batch size is {Config.MAX_BATCH_SIZE}")
+    
+    # Validate all files
+    for file in files:
+        if not file.filename.endswith('.nc'):
+            raise HTTPException(400, f"Invalid file type: {file.filename}. Only NetCDF (.nc) files are allowed")
+    
+    # Create batch ID
+    batch_id = str(uuid.uuid4())
+    
+    # Parse tileset names
+    tileset_name_list = None
+    if tileset_names:
+        tileset_name_list = [name.strip() for name in tileset_names.split(',')]
+        if len(tileset_name_list) != len(files):
+            tileset_name_list = None  # Ignore if count doesn't match
+    
+    # Read all files
+    file_contents = []
+    job_ids = []
+    
+    for i, file in enumerate(files):
+        content = await file.read()
+        
+        # Check individual file size
+        if len(content) > Config.MAX_FILE_SIZE:
+            raise HTTPException(400, f"File {file.filename} too large. Maximum size is {Config.MAX_FILE_SIZE / 1024 / 1024}MB")
+        
+        job_id = f"{batch_id}_{i}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        job_ids.append(job_id)
+        file_contents.append({"file": file, "content": content})
+    
+    # Initialize batch job
+    batch_jobs[batch_id] = {
+        "batch_id": batch_id,
+        "total_files": len(files),
+        "processed_files": 0,
+        "status": "processing",
+        "files": [],
+        "errors": [],
+        "created_at": datetime.now().isoformat()
+    }
+    
+    # Process files
+    if merge_files:
+        # TODO: Implement file merging logic
+        # For now, process separately
+        result = await process_batch_upload(
+            files=file_contents,
+            job_ids=job_ids,
+            create_tileset=create_tileset,
+            tileset_names=tileset_name_list,
+            visualization_type=visualization_type,
+            background_tasks=background_tasks,
+            batch_id=batch_id
+        )
+    else:
+        # Process files separately
+        result = await process_batch_upload(
+            files=file_contents,
+            job_ids=job_ids,
+            create_tileset=create_tileset,
+            tileset_names=tileset_name_list,
+            visualization_type=visualization_type,
+            background_tasks=background_tasks,
+            batch_id=batch_id
+        )
+    
+    # Update batch job status
+    batch_jobs[batch_id].update(result)
+    
+    return JSONResponse(result)
+
+async def process_batch_upload(
+    files: List[Dict],
+    job_ids: List[str],
+    create_tileset: bool,
+    tileset_names: Optional[List[str]],
+    visualization_type: str,
+    background_tasks: BackgroundTasks,
+    batch_id: Optional[str] = None
+) -> Dict:
+    """Process multiple NetCDF files"""
+    
+    results = {
+        "batch_id": batch_id,
+        "total_files": len(files),
+        "processed_files": 0,
+        "status": "processing",
+        "files": [],
+        "errors": []
+    }
+    
+    # Process each file
+    for i, file_data in enumerate(files):
+        file = file_data['file']
+        content = file_data['content']
+        job_id = job_ids[i]
+        tileset_name = tileset_names[i] if tileset_names and i < len(tileset_names) else None
+        
+        try:
+            # Sanitize filename
+            safe_filename = Path(file.filename).name
+            safe_filename = ''.join(c if c.isalnum() or c in '.-_' else '_' for c in safe_filename)
+            if not safe_filename.endswith('.nc'):
+                safe_filename = safe_filename.rsplit('.', 1)[0] + '.nc'
+            
+            # Save uploaded file
+            file_path = Config.UPLOAD_DIR / f"{job_id}_{safe_filename}"
+            
+            logger.info(f"Saving uploaded file: {file_path}")
+            
+            async with aiofiles.open(str(file_path), 'wb') as f:
+                await f.write(content)
+            
+            # Process file
+            result = await process_netcdf_file(
+                file_path, job_id, create_tileset, tileset_name, visualization_type, batch_id
+            )
+            
+            # Store session data for client-side animation
+            if result.get('wind_data'):
+                active_sessions[job_id] = {
+                    'file_path': str(file_path),
+                    'wind_data': result['wind_data'],
+                    'bounds': result.get('bounds'),
+                    'center': result.get('center'),
+                    'zoom': result.get('zoom'),
+                    'created_at': datetime.now().isoformat(),
+                    'batch_id': batch_id
+                }
+                result['session_id'] = job_id
+            
+            if create_tileset and Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
+                # Start background tileset creation
+                background_tasks.add_task(
+                    create_mapbox_tileset_background,
+                    file_path,
+                    job_id,
+                    result.get('tileset_id'),
+                    visualization_type,
+                    batch_id
+                )
+                
+                result['status'] = 'processing'
+                result['message'] = f'File {file.filename} uploaded successfully. Creating Mapbox tileset...'
+            
+            results['files'].append({
+                "filename": file.filename,
+                "job_id": job_id,
+                "success": True,
+                **result
+            })
+            results['processed_files'] += 1
+            
+        except Exception as e:
+            logger.error(f"Error processing file {file.filename}: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            results['errors'].append({
+                "filename": file.filename,
+                "error": str(e)
+            })
+            
+            # Clean up file on error
+            if 'file_path' in locals() and file_path.exists():
+                try:
+                    file_path.unlink()
+                except:
+                    pass
+    
+    # Update overall status
+    if results['processed_files'] == results['total_files']:
+        results['status'] = 'completed'
+    elif results['processed_files'] > 0:
+        results['status'] = 'partial'
+    else:
+        results['status'] = 'failed'
+    
+    return results
+
 async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool, 
-                             tileset_name: Optional[str], visualization_type: str) -> Dict:
+                             tileset_name: Optional[str], visualization_type: str,
+                             batch_id: Optional[str] = None) -> Dict:
     """Process NetCDF file and extract metadata"""
     try:
         # Convert Path to string for xarray
@@ -372,6 +535,10 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
         timestamp = datetime.now().strftime("%m%d%H%M")
         prefix = "wx"
         
+        # Add batch indicator if part of batch
+        if batch_id:
+            prefix = f"wxb_{batch_id[:8]}"
+        
         # Ensure tileset ID is under 32 chars
         max_name_length = 32 - len(prefix) - len(timestamp) - 2  # 2 for underscores
         if len(tileset_name) > max_name_length:
@@ -399,7 +566,8 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "status": "processing",
             "scalar_vars": scalar_vars,
             "vector_pairs": vector_pairs,
-            "session_id": job_id  # Link to session for client-side animation
+            "session_id": job_id,
+            "batch_id": batch_id
         }
         
         ds.close()
@@ -419,7 +587,8 @@ async def process_netcdf_file(file_path: Path, job_id: str, create_tileset: bool
             "vector_pairs": vector_pairs,
             "previews": previews,
             "wind_data": wind_data,
-            "session_id": job_id
+            "session_id": job_id,
+            "batch_id": batch_id
         }
         
     except Exception as e:
@@ -576,7 +745,8 @@ def get_dataset_bounds(ds):
     return None
 
 async def create_mapbox_tileset_background(file_path: Path, job_id: str, 
-                                          tileset_id: str, visualization_type: str):
+                                          tileset_id: str, visualization_type: str,
+                                          batch_id: Optional[str] = None):
     """Background task to create Mapbox tileset with proper error handling"""
     try:
         if not Config.MAPBOX_TOKEN:
@@ -634,6 +804,14 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     save_recipe_info(tileset_id, result, active_visualizations[job_id])
                     
                 logger.info("Successfully created raster-array tileset")
+                
+                # Update batch job if part of batch
+                if batch_id and batch_id in batch_jobs:
+                    for file_info in batch_jobs[batch_id]['files']:
+                        if file_info.get('job_id') == job_id:
+                            file_info['status'] = 'completed'
+                            break
+                
                 return
             else:
                 # Check if it's a Pro account issue
@@ -649,6 +827,15 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     if job_id in active_visualizations:
                         active_visualizations[job_id]['error'] = result.get('error')
                         active_visualizations[job_id]['status'] = 'failed'
+                    
+                    # Update batch job if part of batch
+                    if batch_id and batch_id in batch_jobs:
+                        for file_info in batch_jobs[batch_id]['files']:
+                            if file_info.get('job_id') == job_id:
+                                file_info['status'] = 'failed'
+                                file_info['error'] = result.get('error')
+                                break
+                    
                     return
         
         # Fall back to vector format (or if vector was requested)
@@ -680,6 +867,13 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     
                     # Save recipe info with correct formats
                     save_recipe_info(tileset_id, result, active_visualizations[job_id])
+                
+                # Update batch job if part of batch
+                if batch_id and batch_id in batch_jobs:
+                    for file_info in batch_jobs[batch_id]['files']:
+                        if file_info.get('job_id') == job_id:
+                            file_info['status'] = 'completed'
+                            break
                         
             else:
                 error_msg = result.get('error', 'Unknown error')
@@ -689,6 +883,14 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     active_visualizations[job_id]['status'] = 'failed'
                     active_visualizations[job_id]['error'] = error_msg
                 
+                # Update batch job if part of batch
+                if batch_id and batch_id in batch_jobs:
+                    for file_info in batch_jobs[batch_id]['files']:
+                        if file_info.get('job_id') == job_id:
+                            file_info['status'] = 'failed'
+                            file_info['error'] = error_msg
+                            break
+                
     except Exception as e:
         logger.error(f"Error creating tileset: {str(e)}")
         import traceback
@@ -697,6 +899,14 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
         if job_id in active_visualizations:
             active_visualizations[job_id]['status'] = 'failed'
             active_visualizations[job_id]['error'] = str(e)
+        
+        # Update batch job if part of batch
+        if batch_id and batch_id in batch_jobs:
+            for file_info in batch_jobs[batch_id]['files']:
+                if file_info.get('job_id') == job_id:
+                    file_info['status'] = 'failed'
+                    file_info['error'] = str(e)
+                    break
 
 def save_recipe_info(tileset_id: str, result: Dict, viz_info: Dict):
     """Save recipe information for future reference"""
@@ -725,7 +935,8 @@ def save_recipe_info(tileset_id: str, result: Dict, viz_info: Dict):
         "session_id": viz_info.get('session_id'),
         "bounds": viz_info.get('bounds'),  # Save bounds
         "center": viz_info.get('center'),  # Save center
-        "zoom": viz_info.get('zoom')       # Save zoom
+        "zoom": viz_info.get('zoom'),      # Save zoom
+        "batch_id": viz_info.get('batch_id')  # Save batch info
     }
     
     try:
@@ -764,8 +975,49 @@ async def get_visualization_status(job_id: str):
         "session_id": viz_info.get('session_id'),
         "bounds": viz_info.get('bounds'),
         "center": viz_info.get('center'),
-        "zoom": viz_info.get('zoom')
+        "zoom": viz_info.get('zoom'),
+        "batch_id": viz_info.get('batch_id')
     })
+
+@app.get("/api/batch-status/{batch_id}")
+async def get_batch_status(batch_id: str):
+    """Get status of batch processing"""
+    if batch_id not in batch_jobs:
+        raise HTTPException(404, "Batch job not found")
+    
+    batch_info = batch_jobs[batch_id]
+    
+    # Check individual file statuses
+    completed = 0
+    failed = 0
+    processing = 0
+    
+    for file_info in batch_info['files']:
+        job_id = file_info.get('job_id')
+        if job_id in active_visualizations:
+            status = active_visualizations[job_id].get('status', 'processing')
+            if status == 'completed':
+                completed += 1
+            elif status == 'failed':
+                failed += 1
+            else:
+                processing += 1
+    
+    # Update batch status
+    if processing > 0:
+        batch_info['status'] = 'processing'
+    elif failed == len(batch_info['files']):
+        batch_info['status'] = 'failed'
+    elif completed == len(batch_info['files']):
+        batch_info['status'] = 'completed'
+    else:
+        batch_info['status'] = 'partial'
+    
+    batch_info['completed_files'] = completed
+    batch_info['failed_files'] = failed
+    batch_info['processing_files'] = processing
+    
+    return JSONResponse(batch_info)
 
 @app.get("/api/tileset-status/{username}/{tileset_id}")
 async def get_tileset_publish_status(username: str, tileset_id: str):
@@ -834,6 +1086,7 @@ async def load_tileset(tileset_id: str = Form(...)):
         bounds = None
         center = None
         zoom = None
+        batch_id = None
         
         if recipe_files:
             try:
@@ -852,6 +1105,7 @@ async def load_tileset(tileset_id: str = Form(...)):
                     bounds = recipe_data.get('bounds')
                     center = recipe_data.get('center')
                     zoom = recipe_data.get('zoom')
+                    batch_id = recipe_data.get('batch_id')
                     
                     # Double-check format based on source layer
                     if source_layer == '10winds' or is_raster_array:
@@ -894,7 +1148,8 @@ async def load_tileset(tileset_id: str = Form(...)):
                 "session_id": session_id,
                 "bounds": bounds,
                 "center": center,
-                "zoom": zoom
+                "zoom": zoom,
+                "batch_id": batch_id
             }
         })
         
@@ -946,12 +1201,407 @@ async def get_wind_data(session_id: str):
         **wind_data
     })
 
-@app.get("/api/active-visualizations")
-async def get_active_visualizations():
-    """Get list of active visualizations"""
+@app.post("/api/upload-netcdf-as-dataset")
+async def upload_netcdf_as_dataset(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    dataset_name: Optional[str] = Form(None)
+):
+    """Upload NetCDF file and create a Mapbox dataset"""
+    
+    # Validate file
+    if not file.filename.endswith('.nc'):
+        raise HTTPException(400, "Only NetCDF (.nc) files are allowed")
+    
+    # Check file size
+    content = await file.read()
+    file_size = len(content)
+    
+    if file_size > Config.MAX_FILE_SIZE:
+        raise HTTPException(400, f"File too large. Maximum size is {Config.MAX_FILE_SIZE / 1024 / 1024}MB")
+    
+    # Create job
+    job_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    
+    # Save file temporarily
+    safe_filename = Path(file.filename).name
+    safe_filename = ''.join(c if c.isalnum() or c in '.-_' else '_' for c in safe_filename)
+    file_path = Config.UPLOAD_DIR / f"{job_id}_{safe_filename}"
+    
+    try:
+        async with aiofiles.open(str(file_path), 'wb') as f:
+            await f.write(content)
+        
+        # Process in background
+        background_tasks.add_task(
+            create_dataset_background,
+            file_path,
+            job_id,
+            dataset_name,
+            file.filename
+        )
+        
+        return JSONResponse({
+            "success": True,
+            "job_id": job_id,
+            "message": "File uploaded. Creating dataset...",
+            "status": "processing"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error uploading file for dataset: {str(e)}")
+        if file_path.exists():
+            file_path.unlink()
+        raise HTTPException(500, str(e))
+
+@app.post("/api/upload-netcdf-batch-as-datasets")
+async def upload_netcdf_batch_as_datasets(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    dataset_names: Optional[str] = Form(None)  # Comma-separated names
+):
+    """Upload multiple NetCDF files and create Mapbox datasets"""
+    
+    # Validate batch size
+    if len(files) > Config.MAX_BATCH_SIZE:
+        raise HTTPException(400, f"Too many files. Maximum batch size is {Config.MAX_BATCH_SIZE}")
+    
+    # Validate all files
+    for file in files:
+        if not file.filename.endswith('.nc'):
+            raise HTTPException(400, f"Invalid file type: {file.filename}. Only NetCDF (.nc) files are allowed")
+    
+    # Create batch ID
+    batch_id = str(uuid.uuid4())
+    
+    # Parse dataset names
+    dataset_name_list = None
+    if dataset_names:
+        dataset_name_list = [name.strip() for name in dataset_names.split(',')]
+        if len(dataset_name_list) != len(files):
+            dataset_name_list = None
+    
+    # Initialize batch job
+    batch_jobs[batch_id] = {
+        "batch_id": batch_id,
+        "type": "dataset",
+        "total_files": len(files),
+        "processed_files": 0,
+        "status": "processing",
+        "files": [],
+        "errors": [],
+        "datasets": [],
+        "created_at": datetime.now().isoformat()
+    }
+    
+    # Process each file
+    for i, file in enumerate(files):
+        content = await file.read()
+        
+        # Check file size
+        if len(content) > Config.MAX_FILE_SIZE:
+            batch_jobs[batch_id]['errors'].append({
+                "filename": file.filename,
+                "error": f"File too large. Maximum size is {Config.MAX_FILE_SIZE / 1024 / 1024}MB"
+            })
+            continue
+        
+        job_id = f"{batch_id}_{i}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # Save file
+        safe_filename = Path(file.filename).name
+        safe_filename = ''.join(c if c.isalnum() or c in '.-_' else '_' for c in safe_filename)
+        file_path = Config.UPLOAD_DIR / f"{job_id}_{safe_filename}"
+        
+        try:
+            async with aiofiles.open(str(file_path), 'wb') as f:
+                await f.write(content)
+            
+            dataset_name = None
+            if dataset_name_list and i < len(dataset_name_list):
+                dataset_name = dataset_name_list[i]
+            
+            # Process in background
+            background_tasks.add_task(
+                create_dataset_background,
+                file_path,
+                job_id,
+                dataset_name,
+                file.filename,
+                batch_id
+            )
+            
+            batch_jobs[batch_id]['files'].append({
+                "filename": file.filename,
+                "job_id": job_id,
+                "status": "processing"
+            })
+            
+        except Exception as e:
+            logger.error(f"Error processing file {file.filename}: {str(e)}")
+            batch_jobs[batch_id]['errors'].append({
+                "filename": file.filename,
+                "error": str(e)
+            })
+            if file_path.exists():
+                file_path.unlink()
+    
+    return JSONResponse(batch_jobs[batch_id])
+
+async def create_dataset_background(
+    file_path: Path,
+    job_id: str,
+    dataset_name: Optional[str],
+    original_filename: str,
+    batch_id: Optional[str] = None
+):
+    """Background task to create Mapbox dataset from NetCDF"""
+    try:
+        if not Config.MAPBOX_TOKEN:
+            raise Exception("Mapbox token not configured")
+        
+        # Initialize dataset manager
+        dataset_manager = MapboxDatasetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        
+        # Create dataset from NetCDF
+        logger.info(f"Creating dataset from {file_path}")
+        
+        if not dataset_name:
+            dataset_name = f"Weather Data - {Path(original_filename).stem}"
+        
+        result = dataset_manager.process_netcdf_to_dataset(str(file_path), dataset_name)
+        
+        # Store dataset info
+        if result['success']:
+            active_datasets[job_id] = {
+                "job_id": job_id,
+                "dataset_id": result['dataset_id'],
+                "dataset_url": result.get('dataset_url'),
+                "filename": original_filename,
+                "total_features": result.get('total_features', 0),
+                "features_added": result.get('features_added', 0),
+                "status": "completed",
+                "created_at": datetime.now().isoformat(),
+                "batch_id": batch_id
+            }
+            
+            # Update batch job if part of batch
+            if batch_id and batch_id in batch_jobs:
+                batch_jobs[batch_id]['datasets'].append({
+                    "dataset_id": result['dataset_id'],
+                    "dataset_url": result.get('dataset_url'),
+                    "filename": original_filename,
+                    "features": result.get('features_added', 0)
+                })
+                
+                # Update file status
+                for file_info in batch_jobs[batch_id]['files']:
+                    if file_info.get('job_id') == job_id:
+                        file_info['status'] = 'completed'
+                        file_info['dataset_id'] = result['dataset_id']
+                        break
+                
+                batch_jobs[batch_id]['processed_files'] += 1
+                
+                # Update batch status
+                if batch_jobs[batch_id]['processed_files'] == batch_jobs[batch_id]['total_files']:
+                    batch_jobs[batch_id]['status'] = 'completed'
+                elif batch_jobs[batch_id]['processed_files'] > 0:
+                    batch_jobs[batch_id]['status'] = 'partial'
+            
+            logger.info(f"Successfully created dataset: {result['dataset_id']}")
+            
+        else:
+            error_msg = result.get('error', 'Unknown error')
+            logger.error(f"Failed to create dataset: {error_msg}")
+            
+            active_datasets[job_id] = {
+                "job_id": job_id,
+                "filename": original_filename,
+                "status": "failed",
+                "error": error_msg,
+                "created_at": datetime.now().isoformat(),
+                "batch_id": batch_id
+            }
+            
+            # Update batch job if part of batch
+            if batch_id and batch_id in batch_jobs:
+                for file_info in batch_jobs[batch_id]['files']:
+                    if file_info.get('job_id') == job_id:
+                        file_info['status'] = 'failed'
+                        file_info['error'] = error_msg
+                        break
+                
+                batch_jobs[batch_id]['processed_files'] += 1
+                
+                if batch_jobs[batch_id]['processed_files'] == batch_jobs[batch_id]['total_files']:
+                    if all(f.get('status') == 'failed' for f in batch_jobs[batch_id]['files']):
+                        batch_jobs[batch_id]['status'] = 'failed'
+                    else:
+                        batch_jobs[batch_id]['status'] = 'partial'
+        
+    except Exception as e:
+        logger.error(f"Error creating dataset: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        active_datasets[job_id] = {
+            "job_id": job_id,
+            "filename": original_filename,
+            "status": "failed",
+            "error": str(e),
+            "created_at": datetime.now().isoformat(),
+            "batch_id": batch_id
+        }
+        
+        # Update batch job if part of batch
+        if batch_id and batch_id in batch_jobs:
+            for file_info in batch_jobs[batch_id]['files']:
+                if file_info.get('job_id') == job_id:
+                    file_info['status'] = 'failed'
+                    file_info['error'] = str(e)
+                    break
+            
+            batch_jobs[batch_id]['processed_files'] += 1
+    
+    finally:
+        # Clean up file
+        try:
+            if file_path.exists():
+                file_path.unlink()
+                logger.info(f"Cleaned up temporary file: {file_path}")
+        except Exception as e:
+            logger.error(f"Error cleaning up file: {e}")
+
+@app.get("/api/dataset-status/{job_id}")
+async def get_dataset_status(job_id: str):
+    """Get status of dataset creation"""
+    if job_id not in active_datasets:
+        raise HTTPException(404, "Job not found")
+    
+    return JSONResponse(active_datasets[job_id])
+
+@app.get("/api/list-datasets")
+async def list_datasets():
+    """List all user's datasets"""
+    if not Config.MAPBOX_TOKEN:
+        raise HTTPException(500, "Mapbox token not configured")
+    
+    try:
+        dataset_manager = MapboxDatasetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        datasets = dataset_manager.list_datasets(limit=100)
+        
+        # Add weather data indicator
+        weather_datasets = []
+        for ds in datasets:
+            # Include weather-related datasets
+            dataset_name = ds.get('name', '').lower()
+            dataset_id = ds.get('id', '')
+            
+            if any(keyword in dataset_name or keyword in dataset_id.lower() 
+                  for keyword in ['weather', 'netcdf', 'wind', 'temperature', 'pressure']):
+                weather_datasets.append(ds)
+        
+        return JSONResponse({
+            "success": True,
+            "total_datasets": len(datasets),
+            "weather_datasets": weather_datasets,
+            "all_datasets": datasets
+        })
+        
+    except Exception as e:
+        logger.error(f"Error listing datasets: {str(e)}")
+        raise HTTPException(500, str(e))
+
+@app.get("/api/dataset-info/{dataset_id}")
+async def get_dataset_info(dataset_id: str):
+    """Get detailed information about a dataset"""
+    if not Config.MAPBOX_TOKEN:
+        raise HTTPException(500, "Mapbox token not configured")
+    
+    try:
+        dataset_manager = MapboxDatasetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        info = dataset_manager.get_dataset_info(dataset_id)
+        
+        if 'error' in info:
+            raise HTTPException(404, info['error'])
+        
+        return JSONResponse(info)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting dataset info: {str(e)}")
+        raise HTTPException(500, str(e))
+
+@app.delete("/api/dataset/{dataset_id}")
+async def delete_dataset(dataset_id: str):
+    """Delete a dataset"""
+    if not Config.MAPBOX_TOKEN:
+        raise HTTPException(500, "Mapbox token not configured")
+    
+    try:
+        dataset_manager = MapboxDatasetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+        success = dataset_manager.delete_dataset(dataset_id)
+        
+        if success:
+            # Remove from active datasets if exists
+            for job_id, ds_info in list(active_datasets.items()):
+                if ds_info.get('dataset_id') == dataset_id:
+                    del active_datasets[job_id]
+            
+            return {"success": True, "message": "Dataset deleted successfully"}
+        else:
+            raise HTTPException(400, "Failed to delete dataset")
+            
+    except Exception as e:
+        logger.error(f"Error deleting dataset: {str(e)}")
+        raise HTTPException(500, str(e))
+
+@app.get("/api/active-datasets")
+async def get_active_datasets():
+    """Get list of recently created datasets"""
     return JSONResponse({
-        "visualizations": [
-            {
+        "datasets": list(active_datasets.values()),
+        "total": len(active_datasets)
+    })
+
+@app.post("/api/dataset-to-tileset/{dataset_id}")
+async def convert_dataset_to_tileset(
+    dataset_id: str,
+    tileset_name: Optional[str] = Form(None)
+):
+    """Convert a dataset to a tileset for visualization"""
+    if not Config.MAPBOX_TOKEN:
+        raise HTTPException(500, "Mapbox token not configured")
+    
+    try:
+        # This would typically involve:
+        # 1. Exporting dataset as GeoJSON
+        # 2. Creating a tileset source
+        # 3. Creating and publishing a tileset
+        
+        # For now, return a placeholder
+        return JSONResponse({
+            "success": False,
+            "message": "Dataset to tileset conversion requires additional implementation",
+            "info": "You can export the dataset from Mapbox Studio and then upload as a tileset"
+        })
+        
+    except Exception as e:
+        logger.error(f"Error converting dataset to tileset: {str(e)}")
+        raise HTTPException(500, str(e))
+    """Get list of active visualizations"""
+    # Group by batch if applicable
+    batched_visualizations = {}
+    single_visualizations = []
+    
+    for job_id, viz in active_visualizations.items():
+        batch_id = viz.get('batch_id')
+        if batch_id:
+            if batch_id not in batched_visualizations:
+                batched_visualizations[batch_id] = []
+            batched_visualizations[batch_id].append({
                 "job_id": job_id,
                 "tileset_id": viz.get('tileset_id'),
                 "mapbox_tileset": viz.get('mapbox_tileset'),
@@ -968,9 +1618,31 @@ async def get_active_visualizations():
                 "bounds": viz.get('bounds'),
                 "center": viz.get('center'),
                 "zoom": viz.get('zoom')
-            }
-            for job_id, viz in active_visualizations.items()
-        ]
+            })
+        else:
+            single_visualizations.append({
+                "job_id": job_id,
+                "tileset_id": viz.get('tileset_id'),
+                "mapbox_tileset": viz.get('mapbox_tileset'),
+                "status": viz.get('status', 'processing'),
+                "created_at": viz.get('created_at'),
+                "format": viz.get('format', 'vector'),
+                "actual_format": viz.get('actual_format', viz.get('format', 'vector')),
+                "requested_format": viz.get('requested_format', 'vector'),
+                "wind_components": viz.get('wind_components'),
+                "scalar_vars": viz.get('scalar_vars', []),
+                "vector_pairs": viz.get('vector_pairs', []),
+                "use_client_animation": viz.get('use_client_animation', False),
+                "session_id": viz.get('session_id'),
+                "bounds": viz.get('bounds'),
+                "center": viz.get('center'),
+                "zoom": viz.get('zoom')
+            })
+    
+    return JSONResponse({
+        "single_visualizations": single_visualizations,
+        "batched_visualizations": batched_visualizations,
+        "batch_jobs": batch_jobs
     })
 
 @app.delete("/api/visualization/{job_id}")
@@ -999,6 +1671,48 @@ async def delete_visualization(job_id: str):
     
     return {"success": True, "message": "Visualization deleted"}
 
+@app.delete("/api/batch/{batch_id}")
+async def delete_batch(batch_id: str):
+    """Delete all visualizations in a batch"""
+    if batch_id not in batch_jobs:
+        raise HTTPException(404, "Batch not found")
+    
+    batch_info = batch_jobs[batch_id]
+    deleted_count = 0
+    
+    # Delete all visualizations in the batch
+    for file_info in batch_info['files']:
+        job_id = file_info.get('job_id')
+        if job_id and job_id in active_visualizations:
+            viz_info = active_visualizations[job_id]
+            
+            # Delete uploaded file
+            try:
+                file_path = Path(viz_info['file_path'])
+                if file_path.exists():
+                    file_path.unlink()
+                    logger.info(f"Deleted file: {file_path}")
+            except Exception as e:
+                logger.error(f"Error deleting file: {e}")
+            
+            # Remove from active visualizations
+            del active_visualizations[job_id]
+            
+            # Remove from active sessions if exists
+            if job_id in active_sessions:
+                del active_sessions[job_id]
+            
+            deleted_count += 1
+    
+    # Remove batch job
+    del batch_jobs[batch_id]
+    
+    return {
+        "success": True,
+        "message": f"Batch deleted. Removed {deleted_count} visualizations.",
+        "deleted_count": deleted_count
+    }
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -1008,7 +1722,9 @@ async def health_check():
         "mapbox_public_token": bool(Config.MAPBOX_PUBLIC_TOKEN),
         "active_jobs": len(active_visualizations),
         "active_sessions": len(active_sessions),
-        "version": "4.0.0"
+        "active_batches": len(batch_jobs),
+        "active_datasets": len(active_datasets),
+        "version": "5.0.0"
     }
 
 # Cleanup old files periodically
@@ -1033,6 +1749,17 @@ async def cleanup_old_files():
         for session_id in to_remove:
             del active_sessions[session_id]
             logger.info(f"Cleaned up old session: {session_id}")
+        
+        # Clean up old batch jobs
+        to_remove = []
+        for batch_id, batch_data in batch_jobs.items():
+            created_at = datetime.fromisoformat(batch_data.get('created_at', datetime.now().isoformat()))
+            if (datetime.now() - created_at).total_seconds() > 24 * 3600:
+                to_remove.append(batch_id)
+        
+        for batch_id in to_remove:
+            del batch_jobs[batch_id]
+            logger.info(f"Cleaned up old batch job: {batch_id}")
                     
     except Exception as e:
         logger.error(f"Error during cleanup: {e}")
@@ -1040,10 +1767,11 @@ async def cleanup_old_files():
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    logger.info("Starting Weather Visualization Platform v4.0...")
+    logger.info("Starting Weather Visualization Platform v5.0...")
     logger.info(f"Mapbox Username: {Config.MAPBOX_USERNAME}")
     logger.info(f"Mapbox Token Set: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
     logger.info(f"Mapbox Public Token Set: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
+    logger.info(f"Max Batch Size: {Config.MAX_BATCH_SIZE}")
     
     # Run cleanup
     await cleanup_old_files()
@@ -1057,6 +1785,12 @@ async def startup_event():
             
         except Exception as e:
             logger.error(f"Mapbox connection test failed: {e}")
+
+# Shutdown event
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down Weather Visualization Platform...")
+    executor.shutdown(wait=True)
 
 if __name__ == "__main__":
     import uvicorn

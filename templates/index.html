@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Weather Visualization Platform</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v3.5.1/mapbox-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div id="map"></div>
+
+    <div class="control-panel">
+        <h3>🌍 Weather Visualization</h3>
+
+        <input type="file" id="fileInput" accept=".nc" multiple style="display: none;">
+        <button class="btn" onclick="document.getElementById('fileInput').click()">
+            📁 Choose NetCDF File(s)
+        </button>
+
+        <div id="vizTypeSelection" class="radio-group">
+            <label><input type="radio" name="vizType" value="vector" checked> Static Visualization (Vector)</label>
+            <label><input type="radio" name="vizType" value="raster-array"> Animated Visualization (Raster-Array)</label>
+        </div>
+
+        <button id="uploadBtn" class="btn btn-success">
+            ⬆️ Upload
+        </button>
+
+        <div class="preview-container" id="previewContainer"></div>
+        <div id="uploadResult"></div>
+    </div>
+
+    <div class="progress-container" id="progressContainer">
+        <div id="progressBar"></div>
+        <div id="progressText">...</div>
+    </div>
+
+    <script>
+        mapboxgl.accessToken = '{{ Config.MAPBOX_PUBLIC_TOKEN }}';
+    </script>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
