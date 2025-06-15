@@ -1,4 +1,5 @@
 # app.py - Weather Visualization Application with Multi-file Upload Support and File Management
+
 from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException, BackgroundTasks, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -12,7 +13,7 @@ import json
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any  # Make sure 'Any' is imported
 import aiofiles
 from datetime import datetime
 import logging
@@ -111,7 +112,7 @@ class BatchProcessingStatus(BaseModel):
     total_files: int
     processed_files: int
     status: str
-    files: List[Dict[str, any]]
+    files: List[Dict[str, Any]]  # Correct - uppercase 'Any'
     errors: List[Dict[str, str]]
 
 class FileInfo(BaseModel):
