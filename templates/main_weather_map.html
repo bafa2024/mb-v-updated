@@ -1828,7 +1828,594 @@
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
     
-    // Existing functions remain the same...
+    // Upload Modal Functions
+    function openUploadModal() {
+        // This function would open a modal for uploading new files
+        // Since you mentioned you want to use the existing upload functionality
+        // I'll trigger the file input click
+        document.getElementById('fileInput').click();
+    }
+    
+    // File upload functions
+    function handleFileSelect(event) {
+        const files = Array.from(event.target.files);
+        
+        if (files.length === 0) return;
+        
+        // Validate files
+        const validFiles = files.filter(file => {
+            if (!file.name.endsWith('.nc')) {
+                showNotification(`Invalid file type: ${file.name}. Only NetCDF (.nc) files are allowed`, 'error');
+                return false;
+            }
+            return true;
+        });
+        
+        if (validFiles.length === 0) {
+            event.target.value = '';
+            return;
+        }
+        
+        // Check batch size limit
+        if (validFiles.length > MAX_BATCH_SIZE) {
+            showNotification(`Too many files selected. Maximum batch size is ${MAX_BATCH_SIZE}`, 'error');
+            event.target.value = '';
+            return;
+        }
+        
+        // Update selected files
+        selectedFiles = validFiles;
+        displaySelectedFiles();
+        
+        // Show upload options
+        document.getElementById('uploadBtn').style.display = 'block';
+        document.getElementById('clearFilesBtn').style.display = 'block';
+        document.getElementById('vizTypeSelection').style.display = 'block';
+        
+        if (selectedFiles.length > 1) {
+            document.getElementById('batchOptions').style.display = 'block';
+            document.getElementById('fileCount').textContent = selectedFiles.length;
+        } else {
+            document.getElementById('batchOptions').style.display = 'none';
+            document.getElementById('fileCount').textContent = '';
+        }
+    }
+    
+    function displaySelectedFiles() {
+        const fileList = document.getElementById('fileList');
+        const fileItems = document.getElementById('fileItems');
+        
+        if (selectedFiles.length === 0) {
+            fileList.style.display = 'none';
+            return;
+        }
+        
+        fileList.style.display = 'block';
+        fileItems.innerHTML = '';
+        
+        selectedFiles.forEach((file, index) => {
+            const fileSize = (file.size / 1024 / 1024).toFixed(2);
+            const fileItem = document.createElement('div');
+            fileItem.className = 'file-item';
+            fileItem.innerHTML = `
+                <span class="file-name">${file.name}</span>
+                <span class="file-size">${fileSize} MB</span>
+                <span class="remove-file" onclick="removeFile(${index})">×</span>
+            `;
+            fileItems.appendChild(fileItem);
+        });
+    }
+    
+    function removeFile(index) {
+        selectedFiles.splice(index, 1);
+        displaySelectedFiles();
+        
+        if (selectedFiles.length === 0) {
+            clearSelectedFiles();
+        } else {
+            document.getElementById('fileCount').textContent = selectedFiles.length;
+        }
+    }
+    
+    function clearSelectedFiles() {
+        selectedFiles = [];
+        document.getElementById('fileInput').value = '';
+        document.getElementById('fileList').style.display = 'none';
+        document.getElementById('uploadBtn').style.display = 'none';
+        document.getElementById('clearFilesBtn').style.display = 'none';
+        document.getElementById('vizTypeSelection').style.display = 'none';
+        document.getElementById('batchOptions').style.display = 'none';
+    }
+    
+    async function uploadFiles() {
+        if (selectedFiles.length === 0) {
+            showNotification('Please select files first', 'error');
+            return;
+        }
+        
+        // Get selected upload type
+        const uploadType = document.querySelector('input[name="uploadType"]:checked').value;
+        
+        // Get selected visualization type (for tilesets)
+        const vizType = document.querySelector('input[name="vizType"]:checked').value;
+        const mergeFiles = document.getElementById('mergeFiles').checked;
+        
+        // Hide upload button and show progress
+        document.getElementById('uploadBtn').style.display = 'none';
+        document.getElementById('clearFilesBtn').style.display = 'none';
+        
+        if (uploadType === 'dataset') {
+            // Upload as datasets only
+            if (selectedFiles.length === 1) {
+                await uploadSingleFileAsDataset(selectedFiles[0]);
+            } else {
+                await uploadBatchAsDatasets(selectedFiles);
+            }
+        } else if (uploadType === 'both') {
+            // Upload as both tilesets and datasets
+            showNotification('📦 Creating both tilesets and datasets...', 'info');
+            
+            // Start both processes
+            const promises = [];
+            
+            if (selectedFiles.length === 1) {
+                promises.push(uploadSingleFile(selectedFiles[0], vizType));
+                promises.push(uploadSingleFileAsDataset(selectedFiles[0]));
+            } else {
+                promises.push(uploadBatch(selectedFiles, vizType, mergeFiles));
+                promises.push(uploadBatchAsDatasets(selectedFiles));
+            }
+            
+            await Promise.all(promises);
+        } else {
+            // Default: upload as tilesets
+            if (selectedFiles.length === 1) {
+                await uploadSingleFile(selectedFiles[0], vizType);
+            } else {
+                await uploadBatch(selectedFiles, vizType, mergeFiles);
+            }
+        }
+        
+        // Refresh file list after upload
+        setTimeout(() => loadFileList(), 2000);
+    }
+    
+    async function uploadSingleFile(file, vizType) {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('create_tileset', 'true');
+        formData.append('visualization_type', vizType);
+        
+        // Show progress
+        document.getElementById('progressContainer').style.display = 'block';
+        updateProgress(10, 'Uploading file...');
+        
+        try {
+            const response = await fetch('/api/upload-netcdf', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Upload response error:', errorText);
+                throw new Error(`Upload failed: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                updateProgress(50, 'Processing NetCDF...');
+                showNotification('📊 File uploaded successfully! Processing...', 'info');
+                
+                // Display file metadata
+                displaySingleFileResult(result);
+                
+                // Store session ID for client-side animation
+                if (result.session_id) {
+                    window.currentSessionId = result.session_id;
+                }
+                
+                // Start checking processing status
+                checkProcessingStatus(result.job_id, vizType);
+            } else {
+                throw new Error(result.error || 'Upload failed');
+            }
+            
+        } catch (error) {
+            console.error('Upload error:', error);
+            showNotification('❌ Upload failed: ' + error.message, 'error');
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('uploadBtn').style.display = 'block';
+            document.getElementById('clearFilesBtn').style.display = 'block';
+        }
+    }
+    
+    async function uploadBatch(files, vizType, mergeFiles) {
+        const formData = new FormData();
+        
+        // Add all files
+        files.forEach(file => {
+            formData.append('files', file);
+        });
+        
+        formData.append('create_tileset', 'true');
+        formData.append('visualization_type', vizType);
+        formData.append('merge_files', mergeFiles);
+        
+        // Show batch progress
+        document.getElementById('batchProgress').style.display = 'block';
+        updateBatchProgress(0, files.length, 0, 0);
+        
+        try {
+            const response = await fetch('/api/upload-netcdf-batch', {
+                method: 'POST',
+                body: formData
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('Batch upload response error:', errorText);
+                throw new Error(`Batch upload failed: ${response.status}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.batch_id) {
+                currentBatchId = result.batch_id;
+                showNotification(`📦 Batch upload started. Processing ${files.length} files...`, 'info');
+                
+                // Display batch results
+                displayBatchResults(result);
+                
+                // Start checking batch status
+                checkBatchStatus(result.batch_id);
+                
+                // Add to active batches
+                addActiveBatch(result);
+            } else {
+                throw new Error('No batch ID returned');
+            }
+            
+        } catch (error) {
+            console.error('Batch upload error:', error);
+            showNotification('❌ Batch upload failed: ' + error.message, 'error');
+            document.getElementById('batchProgress').style.display = 'none';
+            document.getElementById('uploadBtn').style.display = 'block';
+            document.getElementById('clearFilesBtn').style.display = 'block';
+        }
+    }
+    
+    async function uploadSingleFileAsDataset(file) {
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        try {
+            const response = await fetch('/api/upload-netcdf-as-dataset', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                showNotification('📊 Dataset created successfully!', 'success');
+            } else {
+                showNotification('❌ Dataset creation failed: ' + result.error, 'error');
+            }
+            
+        } catch (error) {
+            console.error('Dataset upload error:', error);
+            showNotification('❌ Dataset upload failed: ' + error.message, 'error');
+        }
+    }
+    
+    async function uploadBatchAsDatasets(files) {
+        const formData = new FormData();
+        
+        files.forEach(file => {
+            formData.append('files', file);
+        });
+        
+        try {
+            const response = await fetch('/api/upload-netcdf-batch-as-datasets', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.batch_id) {
+                showNotification(`📊 Creating ${files.length} datasets...`, 'info');
+            } else {
+                showNotification('❌ Batch dataset creation failed', 'error');
+            }
+            
+        } catch (error) {
+            console.error('Batch dataset upload error:', error);
+            showNotification('❌ Batch dataset upload failed: ' + error.message, 'error');
+        }
+    }
+    
+    function displaySingleFileResult(data) {
+        const uploadResults = document.getElementById('uploadResults');
+        uploadResults.style.display = 'block';
+        
+        const summaryTab = document.getElementById('summaryTab');
+        let html = '<div style="color: white; font-size: 14px;">';
+        html += `<p><strong>File:</strong> ${data.filename || 'Uploaded file'}</p>`;
+        html += `<p><strong>Variables:</strong> ${data.metadata.variables.length}</p>`;
+        
+        if (data.scalar_vars && data.scalar_vars.length > 0) {
+            html += `<p><strong>Scalar Fields:</strong> ${data.scalar_vars.slice(0, 5).join(', ')}</p>`;
+        }
+        
+        if (data.vector_pairs && data.vector_pairs.length > 0) {
+            html += `<p><strong>Vector Fields:</strong> ${data.vector_pairs.map(p => p.name).join(', ')}</p>`;
+        }
+        
+        if (data.previews) {
+            html += '<div style="margin-top: 15px;"><strong>Data Preview:</strong></div>';
+            for (const [var_name, stats] of Object.entries(data.previews)) {
+                html += `<div style="margin-top: 10px; padding: 10px; background: rgba(255,255,255,0.05); border-radius: 6px;">`;
+                html += `<strong>${var_name}:</strong> ${stats.min.toFixed(2)} to ${stats.max.toFixed(2)} ${stats.units}`;
+                html += `</div>`;
+            }
+        }
+        
+        html += '</div>';
+        summaryTab.innerHTML = html;
+        
+        document.getElementById('progressContainer').style.display = 'none';
+    }
+    
+    function displayBatchResults(result) {
+        const uploadResults = document.getElementById('uploadResults');
+        uploadResults.style.display = 'block';
+        
+        const summaryTab = document.getElementById('summaryTab');
+        let html = '<div style="color: white; font-size: 14px;">';
+        html += `<h4>Batch Upload Summary</h4>`;
+        html += `<p><strong>Total Files:</strong> ${result.total_files}</p>`;
+        html += `<p><strong>Processing:</strong> ${result.processed_files}</p>`;
+        html += `<p><strong>Status:</strong> ${result.status}</p>`;
+        
+        if (result.errors && result.errors.length > 0) {
+            html += '<div style="margin-top: 15px;"><strong>Errors:</strong></div>';
+            result.errors.forEach(error => {
+                html += `<div style="color: #ef4444; margin-top: 5px;">${error.filename}: ${error.error}</div>`;
+            });
+        }
+        
+        html += '</div>';
+        summaryTab.innerHTML = html;
+    }
+    
+    async function checkProcessingStatus(jobId, vizType) {
+        let checkCount = 0;
+        const maxChecks = 120; // 10 minutes max (5 second intervals)
+        
+        // Clear any existing interval
+        if (checkStatusInterval) {
+            clearInterval(checkStatusInterval);
+        }
+        
+        checkStatusInterval = setInterval(async () => {
+            try {
+                checkCount++;
+                
+                const response = await fetch(`/api/visualization-status/${jobId}`);
+                const status = await response.json();
+                
+                if (status.status === 'completed') {
+                    clearInterval(checkStatusInterval);
+                    updateProgress(90, 'Tileset created! Waiting for publishing...');
+                    
+                    // Complete the upload
+                    completeUpload(status);
+                    
+                } else if (status.status === 'failed') {
+                    clearInterval(checkStatusInterval);
+                    updateProgress(0, 'Processing failed');
+                    
+                    let errorMsg = status.error || 'Unknown error';
+                    showNotification('❌ Processing failed: ' + errorMsg, 'error');
+                    
+                    // Reset UI after delay
+                    setTimeout(() => {
+                        document.getElementById('progressContainer').style.display = 'none';
+                        document.getElementById('vizTypeSelection').style.display = 'none';
+                        document.getElementById('fileInput').value = '';
+                        clearSelectedFiles();
+                    }, 3000);
+                    
+                } else {
+                    // Still processing
+                    let progress = 60;
+                    if (checkCount > 10) progress = 70;
+                    if (checkCount > 20) progress = 80;
+                    if (checkCount > 30) progress = 85;
+                    
+                    updateProgress(progress, 'Creating Mapbox tileset...');
+                    
+                    if (checkCount >= maxChecks) {
+                        clearInterval(checkStatusInterval);
+                        showNotification('⏱️ Processing is taking longer than expected. The tileset may still be processing in the background.', 'warning');
+                        completeUpload(status);
+                    }
+                }
+            } catch (error) {
+                clearInterval(checkStatusInterval);
+                showNotification('❌ Status check failed', 'error');
+                document.getElementById('progressContainer').style.display = 'none';
+                document.getElementById('vizTypeSelection').style.display = 'none';
+                clearSelectedFiles();
+            }
+        }, 5000); // Check every 5 seconds
+    }
+    
+    async function checkBatchStatus(batchId) {
+        let checkCount = 0;
+        const maxChecks = 120; // 10 minutes max
+        
+        if (batchCheckInterval) {
+            clearInterval(batchCheckInterval);
+        }
+        
+        batchCheckInterval = setInterval(async () => {
+            try {
+                checkCount++;
+                
+                const response = await fetch(`/api/batch-status/${batchId}`);
+                const status = await response.json();
+                
+                updateBatchProgress(
+                    status.processed_files || 0,
+                    status.total_files,
+                    status.completed_files || 0,
+                    status.failed_files || 0
+                );
+                
+                if (status.status === 'completed' || status.status === 'failed') {
+                    clearInterval(batchCheckInterval);
+                    
+                    if (status.status === 'completed') {
+                        showNotification('✅ Batch processing completed!', 'success');
+                    } else {
+                        showNotification('❌ Batch processing failed', 'error');
+                    }
+                    
+                    setTimeout(() => {
+                        document.getElementById('batchProgress').style.display = 'none';
+                        clearSelectedFiles();
+                    }, 3000);
+                }
+                
+                if (checkCount >= maxChecks) {
+                    clearInterval(batchCheckInterval);
+                    showNotification('⏱️ Batch processing timeout', 'warning');
+                }
+                
+            } catch (error) {
+                clearInterval(batchCheckInterval);
+                showNotification('❌ Batch status check failed', 'error');
+            }
+        }, 5000);
+    }
+    
+    function completeUpload(status) {
+        updateProgress(100, 'Upload complete!');
+        showNotification('✅ NetCDF file processed successfully!', 'success');
+        
+        const selector = document.getElementById('tilesetSelector');
+        const tilesetId = status.mapbox_tileset || `{{ mapbox_username }}.${status.tileset_id}`;
+        
+        // Check if option already exists
+        let optionExists = false;
+        for (let option of selector.options) {
+            if (option.value === tilesetId) {
+                optionExists = true;
+                break;
+            }
+        }
+        
+        if (!optionExists) {
+            const option = document.createElement('option');
+            option.value = tilesetId;
+            
+            // Use actual_format if available, otherwise fall back to format
+            const actualFormat = status.actual_format || status.format || 'vector';
+            const requestedFormat = status.requested_format || status.visualization_type || 'vector';
+            
+            // Set all necessary attributes
+            option.setAttribute('data-format', actualFormat);
+            option.setAttribute('data-actual-format', actualFormat);
+            option.setAttribute('data-requested-format', requestedFormat);
+            option.setAttribute('data-type', 'user');
+            option.setAttribute('data-source-layer', status.source_layer || (actualFormat === 'raster-array' ? '10winds' : 'weather_data'));
+            option.setAttribute('data-session-id', status.session_id || '');
+            option.setAttribute('data-use-client-animation', status.use_client_animation ? 'true' : 'false');
+            option.setAttribute('data-batch-id', status.batch_id || '');
+            
+            // Add format indicator to the option text
+            const formatIndicator = actualFormat === 'raster-array' ? '🎬' : '📍';
+            const batchIndicator = status.batch_id ? ' [Batch]' : '';
+            option.textContent = `${formatIndicator} Uploaded: ${status.tileset_id}${batchIndicator}`;
+            
+            selector.appendChild(option);
+        }
+        
+        // Auto-select and load the new tileset
+        selector.value = tilesetId;
+        
+        // Handle client-side animation for vector format when raster was requested
+        if (status.actual_format === 'vector' && status.requested_format === 'raster-array' && status.use_client_animation && status.session_id) {
+            showNotification('ℹ️ Using client-side animation (GPU animation requires Pro account)', 'info');
+            
+            // Wait a moment then load client-side animation
+            setTimeout(() => {
+                loadClientSideWindAnimation(status.session_id);
+            }, 2000);
+        } else if (status.actual_format === 'raster-array') {
+            showNotification('🎨 Starting animated visualization... Please wait.', 'info');
+            // Trigger tileset change event
+            setTimeout(() => {
+                selector.dispatchEvent(new Event('change'));
+            }, 3000);
+        } else {
+            showNotification('🎨 Starting visualization... Please wait.', 'info');
+            // Trigger tileset change event
+            setTimeout(() => {
+                selector.dispatchEvent(new Event('change'));
+            }, 3000);
+        }
+        
+        setTimeout(() => {
+            document.getElementById('progressContainer').style.display = 'none';
+            document.getElementById('vizTypeSelection').style.display = 'none';
+            document.getElementById('fileInput').value = '';
+            clearSelectedFiles();
+            
+            // Hide file analysis
+            const uploadResult = document.getElementById('uploadResults');
+            if (uploadResult) {
+                uploadResult.style.display = 'none';
+            }
+        }, 3000);
+    }
+    
+    function updateProgress(percent, text) {
+        document.getElementById('progressFill').style.width = percent + '%';
+        document.getElementById('progressFill').textContent = percent + '%';
+        document.getElementById('progressText').textContent = text;
+    }
+    
+    function updateBatchProgress(processed, total, completed, failed) {
+        const progress = total > 0 ? Math.round((processed / total) * 100) : 0;
+        
+        document.getElementById('batchProgressFill').style.width = `${progress}%`;
+        document.getElementById('batchProgressFill').textContent = `${progress}%`;
+        
+        document.getElementById('batchTotal').textContent = total;
+        document.getElementById('batchCompleted').textContent = completed;
+        document.getElementById('batchFailed').textContent = failed;
+    }
+    
+    function switchTab(tabName) {
+        // Remove active class from all tabs
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.classList.remove('active');
+        });
+        document.querySelectorAll('.tab-content').forEach(content => {
+            content.classList.remove('active');
+        });
+        
+        // Add active class to selected tab
+        event.target.classList.add('active');
+        document.getElementById(`${tabName}Tab`).classList.add('active');
+    }
+    
+    // Visualization functions
     function loadDefaultWindVisualization() {
         try {
             // Clear any existing layers first
@@ -1874,7 +2461,6 @@
         }
     }
     
-    // Get wind color scale
     function getWindColorScale() {
         return [
             'interpolate',
@@ -1896,88 +2482,696 @@
         ];
     }
     
-    // Setup event listeners
-    function setupEventListeners() {
-        // File input
-        document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+    async function handleTilesetChange(event) {
+        const tilesetId = event.target.value;
+        const selectedOption = event.target.selectedOptions[0];
         
-        // Upload button
-        document.getElementById('uploadBtn').addEventListener('click', uploadFiles);
+        // Get all format attributes
+        const format = selectedOption.getAttribute('data-format') || 'vector';
+        const actualFormat = selectedOption.getAttribute('data-actual-format') || format;
+        const requestedFormat = selectedOption.getAttribute('data-requested-format') || format;
+        const sourceLayer = selectedOption.getAttribute('data-source-layer') || (actualFormat === 'raster-array' ? '10winds' : 'weather_data');
+        const sessionId = selectedOption.getAttribute('data-session-id') || '';
+        const useClientAnimation = selectedOption.getAttribute('data-use-client-animation') === 'true';
+        const batchId = selectedOption.getAttribute('data-batch-id') || '';
         
-        // Tileset selector
-        document.getElementById('tilesetSelector').addEventListener('change', handleTilesetChange);
+        console.log(`Loading tileset: ${tilesetId}, actual format: ${actualFormat}, requested: ${requestedFormat}, session: ${sessionId}, client animation: ${useClientAnimation}, batch: ${batchId}`);
         
-        // Wind controls
-        document.getElementById('speedSlider').addEventListener('input', updateWindParams);
-        document.getElementById('particleSlider').addEventListener('input', updateWindParams);
-        document.getElementById('fadeSlider').addEventListener('input', updateWindParams);
-        document.getElementById('resetSlider').addEventListener('input', updateWindParams);
+        // Clear existing visualization
+        clearWindVisualization();
         
-        // Buttons
-        document.getElementById('resetViewBtn').addEventListener('click', resetView);
-        document.getElementById('clearBtn').addEventListener('click', clearWindVisualization);
-        document.getElementById('debugBtn').addEventListener('click', debugData);
+        // Show loading
+        document.getElementById('loading').classList.add('active');
         
-        // Modal close on click outside
-        document.getElementById('fileDetailsModal').addEventListener('click', (e) => {
-            if (e.target.id === 'fileDetailsModal') {
-                closeFileDetailsModal();
+        // Check if we should use client-side animation
+        if (useClientAnimation && sessionId && actualFormat === 'vector') {
+            // Use client-side animation for vector tilesets that requested raster-array
+            document.getElementById('loading').classList.remove('active');
+            showNotification('🌀 Loading client-side wind animation...', 'info');
+            loadClientSideWindAnimation(sessionId);
+        } else {
+            // Load regular tileset
+            const formatText = actualFormat === 'raster-array' ? 'animation' : 'static';
+            const batchText = batchId ? ' (from batch)' : '';
+            showNotification(`🚀 Loading ${formatText} visualization${batchText}...`, 'info');
+            
+            try {
+                if (tilesetId === '{{ default_tileset.id }}') {
+                    // Load default wind visualization
+                    loadDefaultWindVisualization();
+                } else {
+                    // Load custom tileset
+                    await loadCustomTileset(tilesetId, actualFormat, sourceLayer);
+                }
+            } catch (error) {
+                console.error('Error loading tileset:', error);
+                showNotification('❌ Failed to load tileset: ' + error.message, 'error');
+            } finally {
+                document.getElementById('loading').classList.remove('active');
+            }
+        }
+    }
+    
+    async function loadCustomTileset(tilesetId, format, sourceLayer) {
+        const formData = new FormData();
+        formData.append('tileset_id', tilesetId);
+        
+        try {
+            const response = await fetch('/api/load-tileset', {
+                method: 'POST',
+                body: formData
+            });
+            
+            const result = await response.json();
+            
+            if (result.success) {
+                // Clear existing layers
+                clearVisualizationLayers();
+                
+                // Load tileset based on format
+                if (result.format === 'raster-array' || result.actual_format === 'raster-array') {
+                    // Load raster-array tileset
+                    loadRasterArrayTileset(tilesetId, result.config);
+                } else {
+                    // Load vector tileset
+                    loadVectorTileset(tilesetId, result.config);
+                }
+                
+                currentTilesetId = tilesetId;
+                currentFormat = result.actual_format || result.format;
+                
+                showNotification('✅ Tileset loaded successfully', 'success');
+                
+                // Update visualization info
+                updateVisualizationInfo(
+                    result.type === 'default' ? 'Default GFS Wind' : 'Custom Upload',
+                    currentFormat,
+                    null
+                );
+                
+                // Handle bounds and center if available
+                if (result.config.bounds) {
+                    const bounds = result.config.bounds;
+                    map.fitBounds([
+                        [bounds.west, bounds.south],
+                        [bounds.east, bounds.north]
+                    ], { padding: 50 });
+                } else if (result.config.center && result.config.zoom) {
+                    map.flyTo({
+                        center: result.config.center,
+                        zoom: result.config.zoom
+                    });
+                }
+                
+            } else {
+                showNotification('Failed to load tileset', 'error');
+            }
+        } catch (error) {
+            console.error('Error loading tileset:', error);
+            showNotification('Error loading tileset: ' + error.message, 'error');
+        }
+    }
+    
+    function loadRasterArrayTileset(tilesetId, config) {
+        // Add source
+        map.addSource('custom-wind', {
+            'type': 'raster-array',
+            'url': `mapbox://${tilesetId}`,
+            'tileSize': 512
+        });
+        
+        // Add layer
+        map.addLayer({
+            'id': 'wind-layer',
+            'type': 'raster-particle',
+            'source': 'custom-wind',
+            'source-layer': config.source_layer || '10winds',
+            'paint': {
+                'raster-particle-speed-factor': 0.4,
+                'raster-particle-fade-opacity-factor': 0.9,
+                'raster-particle-reset-rate-factor': 0.4,
+                'raster-particle-count': 4000,
+                'raster-particle-max-speed': 40,
+                'raster-particle-color': getWindColorScale()
+            }
+        });
+        
+        currentVisualizationType = 'particles';
+        enableWindControls(true);
+    }
+    
+    function loadVectorTileset(tilesetId, config) {
+        // Add source
+        map.addSource('custom-data', {
+            'type': 'vector',
+            'url': `mapbox://${tilesetId}`
+        });
+        
+        // Add points layer
+        map.addLayer({
+            'id': 'data-points',
+            'type': 'circle',
+            'source': 'custom-data',
+            'source-layer': config.source_layer || 'weather_data',
+            'paint': {
+                'circle-radius': [
+                    'interpolate',
+                    ['linear'],
+                    ['zoom'],
+                    2, 2,
+                    8, 6
+                ],
+                'circle-color': [
+                    'interpolate',
+                    ['linear'],
+                    ['get', 'speed'],
+                    0, '#3b82f6',
+                    5, '#10b981',
+                    10, '#fbbf24',
+                    15, '#f59e0b',
+                    20, '#ef4444',
+                    25, '#8b5cf6'
+                ],
+                'circle-opacity': 0.8
+            }
+        });
+        
+        currentVisualizationType = 'points';
+        enableWindControls(false);
+    }
+    
+    async function loadClientSideWindAnimation(sessionId) {
+        try {
+            showNotification('🌀 Loading wind animation...', 'info');
+            
+            // Fetch wind data from server
+            const response = await fetch(`/api/wind-data/${sessionId}`);
+            
+            if (!response.ok) {
+                throw new Error('Failed to load wind data');
+            }
+            
+            const windData = await response.json();
+            
+            if (!windData.success) {
+                throw new Error('Failed to load wind data');
+            }
+            
+            // Clear any existing visualization
+            clearWindVisualization();
+            
+            // Create animation overlay
+            if (window.windAnimation) {
+                window.windAnimation.destroy();
+            }
+            
+            window.windAnimation = new WindAnimationOverlay(map, windData);
+            window.windAnimation.start();
+            
+            // Enable controls
+            currentVisualizationType = 'canvas-particles';
+            currentFormat = 'client-side';
+            enableWindControls(true);
+            
+            // Update UI
+            document.getElementById('visualizationInfo').style.display = 'block';
+            document.getElementById('vizType').textContent = 'Wind Animation (Client-Side)';
+            document.getElementById('dataFormat').textContent = 'Canvas Overlay';
+            document.getElementById('dataPoints').textContent = window.windAnimation.particleCount.toLocaleString();
+            
+            // Update control values
+            document.getElementById('speedSlider').value = window.windAnimation.speedFactor;
+            document.getElementById('speedValue').textContent = window.windAnimation.speedFactor;
+            document.getElementById('particleSlider').value = window.windAnimation.particleCount;
+            document.getElementById('particleValue').textContent = window.windAnimation.particleCount;
+            document.getElementById('fadeSlider').value = window.windAnimation.fadeOpacity;
+            document.getElementById('fadeValue').textContent = window.windAnimation.fadeOpacity;
+            
+            showNotification('✅ Client-side wind animation loaded!', 'success');
+            
+        } catch (error) {
+            console.error('Error loading client-side animation:', error);
+            showNotification('❌ Failed to load animation: ' + error.message, 'error');
+            
+            // Fall back to regular tileset loading
+            const selector = document.getElementById('tilesetSelector');
+            selector.dispatchEvent(new Event('change'));
+        }
+    }
+    
+    function clearVisualizationLayers() {
+        // Remove existing layers
+        const layers = ['wind-layer', 'data-points', 'temperature-layer', 'pressure-layer'];
+        layers.forEach(layerId => {
+            if (map.getLayer(layerId)) {
+                map.removeLayer(layerId);
+            }
+        });
+        
+        // Remove sources
+        const sources = ['custom-wind', 'custom-data', 'mapbox-wind'];
+        sources.forEach(sourceId => {
+            if (map.getSource(sourceId)) {
+                map.removeSource(sourceId);
             }
         });
     }
     
-    // The rest of the existing JavaScript code remains the same...
-    // (All the upload, visualization, and map handling functions)
-    
-    // Include all the existing functions from the original file
-    // handleFileSelect, uploadFiles, handleTilesetChange, etc.
-    
-    // Show notification
-    function showNotification(message, type = 'info') {
-        // Remove any existing notifications
-        const existingNotifications = document.querySelectorAll('.notification');
-        existingNotifications.forEach(n => n.remove());
+    function clearWindVisualization() {
+        showNotification('🧹 Clearing visualization...', 'info');
         
-        const notification = document.createElement('div');
-        notification.className = `notification ${type}`;
-        notification.style.cssText = `
-            position: fixed;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: rgba(0, 0, 0, 0.9);
-            color: white;
-            padding: 15px 25px;
-            border-radius: 8px;
-            z-index: 9999;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
-            animation: slideDown 0.3s ease;
-            font-size: 14px;
-            max-width: 400px;
-            text-align: center;
-        `;
+        // Clear any status check intervals
+        if (checkStatusInterval) {
+            clearInterval(checkStatusInterval);
+            checkStatusInterval = null;
+        }
         
-        // Add appropriate emoji and styling based on type
-        const emoji = {
-            'success': '✅',
-            'error': '❌',
-            'warning': '⚠️',
-            'info': 'ℹ️'
-        };
+        if (batchCheckInterval) {
+            clearInterval(batchCheckInterval);
+            batchCheckInterval = null;
+        }
         
-        notification.innerHTML = `${emoji[type] || ''} ${message}`;
-        document.body.appendChild(notification);
+        // Clear client-side animation
+        if (window.windAnimation) {
+            window.windAnimation.destroy();
+            window.windAnimation = null;
+        }
         
-        // Auto-remove after 5 seconds
-        setTimeout(() => {
-            notification.style.animation = 'slideUp 0.3s ease';
-            setTimeout(() => notification.remove(), 300);
-        }, 5000);
+        // Clear all layers
+        clearVisualizationLayers();
+        
+        // Reset UI
+        document.getElementById('visualizationInfo').style.display = 'none';
+        document.getElementById('windControls').style.display = 'none';
+        currentVisualizationType = null;
+        currentFormat = null;
     }
     
-    // Add the rest of the existing functions here...
-    // (Copy all the remaining functions from the original file)
+    function updateWindParams(event) {
+        const slider = event.target;
+        const valueSpan = document.getElementById(slider.id.replace('Slider', 'Value'));
+        valueSpan.textContent = slider.value;
+        
+        // Update particle layer if it exists
+        if (map.getLayer('wind-layer')) {
+            const paintProps = {
+                'raster-particle-speed-factor': parseFloat(document.getElementById('speedSlider').value),
+                'raster-particle-fade-opacity-factor': parseFloat(document.getElementById('fadeSlider').value),
+                'raster-particle-reset-rate-factor': parseFloat(document.getElementById('resetSlider').value),
+                'raster-particle-count': parseInt(document.getElementById('particleSlider').value)
+            };
+            
+            Object.entries(paintProps).forEach(([prop, value]) => {
+                map.setPaintProperty('wind-layer', prop, value);
+            });
+        }
+        
+        // Update client-side animation if it exists
+        if (window.windAnimation) {
+            if (slider.id === 'speedSlider') {
+                window.windAnimation.updateSettings({ speedFactor: parseFloat(slider.value) });
+            } else if (slider.id === 'particleSlider') {
+                window.windAnimation.updateSettings({ particleCount: parseInt(slider.value) });
+                document.getElementById('dataPoints').textContent = slider.value;
+            } else if (slider.id === 'fadeSlider') {
+                window.windAnimation.updateSettings({ fadeOpacity: parseFloat(slider.value) });
+            }
+        }
+    }
     
+    function enableWindControls(enabled) {
+        document.getElementById('windControls').style.display = enabled ? 'block' : 'none';
+    }
+    
+    function updateVisualizationInfo(type, format, pointCount) {
+        document.getElementById('visualizationInfo').style.display = 'block';
+        document.getElementById('vizType').textContent = type;
+        document.getElementById('dataFormat').textContent = format;
+        if (pointCount !== null) {
+            document.getElementById('dataPoints').textContent = pointCount.toLocaleString();
+        } else {
+            document.getElementById('dataPoints').textContent = 'Streaming';
+        }
+    }
+    
+    function resetView() {
+        map.flyTo({
+            center: [-98.5, 39.5],
+            zoom: 4,
+            duration: 1500
+        });
+    }
+    
+    function debugData() {
+        console.log('Current visualization:', {
+            tilesetId: currentTilesetId,
+            type: currentVisualizationType,
+            format: currentFormat,
+            windAnimation: window.windAnimation
+        });
+    }
+    
+    async function checkActiveBatches() {
+        try {
+            const response = await fetch('/api/active-visualizations');
+            const data = await response.json();
+            
+            if (data.batch_jobs && Object.keys(data.batch_jobs).length > 0) {
+                document.getElementById('activeBatches').style.display = 'block';
+               displayActiveBatches(data.batch_jobs);
+           }
+       } catch (error) {
+           console.error('Error checking active batches:', error);
+       }
+   }
+   
+   function displayActiveBatches(batchJobs) {
+       const container = document.getElementById('batchJobsList');
+       container.innerHTML = '';
+       
+       Object.entries(batchJobs).forEach(([batchId, batch]) => {
+           const batchDiv = document.createElement('div');
+           batchDiv.className = 'batch-item';
+           batchDiv.innerHTML = `
+               <h5>Batch ${batchId.substring(0, 8)}...</h5>
+               <p>Files: ${batch.processed_files}/${batch.total_files}</p>
+               <p>Status: ${batch.status}</p>
+               <button class="btn btn-small btn-secondary" onclick="checkBatchStatus('${batchId}')">
+                   Check Status
+               </button>
+           `;
+           container.appendChild(batchDiv);
+       });
+   }
+   
+   function addActiveBatch(batch) {
+       document.getElementById('activeBatches').style.display = 'block';
+       
+       const container = document.getElementById('batchJobsList');
+       const batchDiv = document.createElement('div');
+       batchDiv.className = 'batch-item';
+       batchDiv.id = `batch-${batch.batch_id}`;
+       batchDiv.innerHTML = `
+           <h5>Batch ${batch.batch_id.substring(0, 8)}...</h5>
+           <p>Files: ${batch.processed_files || 0}/${batch.total_files}</p>
+           <p>Status: ${batch.status}</p>
+           <div class="progress-bar" style="margin: 10px 0;">
+               <div class="progress-fill" id="batch-progress-${batch.batch_id}" style="width: 0%">0%</div>
+           </div>
+       `;
+       container.appendChild(batchDiv);
+   }
+   
+   async function loadDatasets() {
+       try {
+           const response = await fetch('/api/list-datasets');
+           const data = await response.json();
+           
+           if (data.success) {
+               displayDatasets(data.weather_datasets);
+           }
+       } catch (error) {
+           console.error('Error loading datasets:', error);
+       }
+   }
+   
+   function displayDatasets(datasets) {
+       const container = document.getElementById('datasetsList');
+       
+       if (datasets.length === 0) {
+           container.innerHTML = '<p style="color: #9ca3af; text-align: center;">No weather datasets found</p>';
+           return;
+       }
+       
+       container.innerHTML = '';
+       
+       datasets.forEach(dataset => {
+           const datasetDiv = document.createElement('div');
+           datasetDiv.className = 'dataset-item';
+           
+           const created = new Date(dataset.created).toLocaleDateString();
+           const features = dataset.features || 'Unknown';
+           
+           datasetDiv.innerHTML = `
+               <div class="dataset-info">
+                   <div class="dataset-details">
+                       <div class="dataset-name">${dataset.name}</div>
+                       <div class="dataset-meta">
+                           Created: ${created} • Features: ${features}
+                           <span class="dataset-badge">Dataset</span>
+                       </div>
+                   </div>
+                   <div class="dataset-actions">
+                       <button class="btn btn-small btn-secondary" onclick="viewDataset('${dataset.id}')">
+                           View
+                       </button>
+                       <button class="btn btn-small btn-danger" onclick="deleteDataset('${dataset.id}')">
+                           Delete
+                       </button>
+                   </div>
+               </div>
+           `;
+           
+           container.appendChild(datasetDiv);
+       });
+   }
+   
+   async function viewDataset(datasetId) {
+       try {
+           const response = await fetch(`/api/dataset-info/${datasetId}`);
+           const info = await response.json();
+           
+           if (info.error) {
+               showNotification('Failed to load dataset info', 'error');
+               return;
+           }
+           
+           // You could show this in a modal or expand the dataset item
+           console.log('Dataset info:', info);
+           showNotification(`Dataset ${info.name}: ${info.features || 0} features`, 'info');
+           
+       } catch (error) {
+           console.error('Error viewing dataset:', error);
+           showNotification('Failed to load dataset info', 'error');
+       }
+   }
+   
+   async function deleteDataset(datasetId) {
+       if (!confirm('Delete this dataset?')) return;
+       
+       try {
+           const response = await fetch(`/api/dataset/${datasetId}`, {
+               method: 'DELETE'
+           });
+           
+           const result = await response.json();
+           
+           if (result.success) {
+               showNotification('Dataset deleted successfully', 'success');
+               loadDatasets();
+           } else {
+               showNotification('Failed to delete dataset', 'error');
+           }
+       } catch (error) {
+           console.error('Error deleting dataset:', error);
+           showNotification('Failed to delete dataset', 'error');
+       }
+   }
+   
+   // Setup event listeners
+   function setupEventListeners() {
+       // File input
+       document.getElementById('fileInput').addEventListener('change', handleFileSelect);
+       
+       // Upload button
+       document.getElementById('uploadBtn').addEventListener('click', uploadFiles);
+       
+       // Tileset selector
+       document.getElementById('tilesetSelector').addEventListener('change', handleTilesetChange);
+       
+       // Wind controls
+       document.getElementById('speedSlider').addEventListener('input', updateWindParams);
+       document.getElementById('particleSlider').addEventListener('input', updateWindParams);
+       document.getElementById('fadeSlider').addEventListener('input', updateWindParams);
+       document.getElementById('resetSlider').addEventListener('input', updateWindParams);
+       
+       // Buttons
+       document.getElementById('resetViewBtn').addEventListener('click', resetView);
+       document.getElementById('clearBtn').addEventListener('click', clearWindVisualization);
+       
+       if (document.getElementById('debugBtn')) {
+           document.getElementById('debugBtn').addEventListener('click', debugData);
+       }
+       
+       // Modal close on click outside
+       document.getElementById('fileDetailsModal').addEventListener('click', (e) => {
+           if (e.target.id === 'fileDetailsModal') {
+               closeFileDetailsModal();
+           }
+       });
+       
+       // Keyboard shortcuts
+       document.addEventListener('keydown', (e) => {
+           // Escape to close modals
+           if (e.key === 'Escape') {
+               closeFileDetailsModal();
+           }
+           
+           // Ctrl/Cmd + O to open file upload
+           if ((e.ctrlKey || e.metaKey) && e.key === 'o') {
+               e.preventDefault();
+               document.getElementById('fileInput').click();
+           }
+       });
+   }
+   
+   // Show notification
+   function showNotification(message, type = 'info') {
+       // Remove any existing notifications
+       const existingNotifications = document.querySelectorAll('.notification');
+       existingNotifications.forEach(n => n.remove());
+       
+       const notification = document.createElement('div');
+       notification.className = `notification ${type}`;
+       notification.style.cssText = `
+           position: fixed;
+           top: 20px;
+           left: 50%;
+           transform: translateX(-50%);
+           background: rgba(0, 0, 0, 0.9);
+           color: white;
+           padding: 15px 25px;
+           border-radius: 8px;
+           z-index: 9999;
+           box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+           animation: slideDown 0.3s ease;
+           font-size: 14px;
+           max-width: 400px;
+           text-align: center;
+       `;
+       
+       // Add appropriate emoji and styling based on type
+       const emoji = {
+           'success': '✅',
+           'error': '❌',
+           'warning': '⚠️',
+           'info': 'ℹ️'
+       };
+       
+       notification.innerHTML = `${emoji[type] || ''} ${message}`;
+       document.body.appendChild(notification);
+       
+       // Auto-remove after 5 seconds
+       setTimeout(() => {
+           notification.style.animation = 'slideUp 0.3s ease';
+           setTimeout(() => notification.remove(), 300);
+       }, 5000);
+   }
+   
+   // Add animation keyframes if not already present
+   if (!document.getElementById('animationStyles')) {
+       const style = document.createElement('style');
+       style.id = 'animationStyles';
+       style.textContent = `
+           @keyframes slideDown {
+               from {
+                   transform: translateX(-50%) translateY(-20px);
+                   opacity: 0;
+               }
+               to {
+                   transform: translateX(-50%) translateY(0);
+                   opacity: 1;
+               }
+           }
+           
+           @keyframes slideUp {
+               from {
+                   transform: translateX(-50%) translateY(0);
+                   opacity: 1;
+               }
+               to {
+                   transform: translateX(-50%) translateY(-20px);
+                   opacity: 0;
+               }
+           }
+       `;
+       document.head.appendChild(style);
+   }
+   
+   // Initialize tooltips for file actions
+   function initializeTooltips() {
+       // Add tooltips to action buttons
+       document.querySelectorAll('.file-action-btn').forEach(btn => {
+           btn.addEventListener('mouseenter', (e) => {
+               const tooltip = document.createElement('div');
+               tooltip.className = 'tooltip';
+               tooltip.textContent = e.target.textContent;
+               tooltip.style.cssText = `
+                   position: absolute;
+                   background: rgba(0, 0, 0, 0.8);
+                   color: white;
+                   padding: 5px 10px;
+                   border-radius: 4px;
+                   font-size: 12px;
+                   pointer-events: none;
+                   z-index: 1000;
+               `;
+               
+               document.body.appendChild(tooltip);
+               
+               const rect = e.target.getBoundingClientRect();
+               tooltip.style.left = rect.left + (rect.width / 2) - (tooltip.offsetWidth / 2) + 'px';
+               tooltip.style.top = rect.top - tooltip.offsetHeight - 5 + 'px';
+               
+               e.target.tooltip = tooltip;
+           });
+           
+           btn.addEventListener('mouseleave', (e) => {
+               if (e.target.tooltip) {
+                   e.target.tooltip.remove();
+                   e.target.tooltip = null;
+               }
+           });
+       });
+   }
+   
+   // Periodic refresh of file list (every 30 seconds)
+   setInterval(() => {
+       if (!document.hidden) {
+           loadFileList();
+       }
+   }, 30000);
+   
+   // Handle window resize
+   window.addEventListener('resize', () => {
+       if (window.windAnimation) {
+           window.windAnimation.resizeCanvas();
+       }
+   });
+   
+   // Export functions for global access
+   window.toggleFilePanel = toggleFilePanel;
+   window.viewFileDetails = viewFileDetails;
+   window.loadFileVisualization = loadFileVisualization;
+   window.downloadFile = downloadFile;
+   window.deleteFile = deleteFile;
+   window.removeFile = removeFile;
+   window.selectAll = selectAll;
+   window.deleteSelected = deleteSelected;
+   window.searchFiles = searchFiles;
+   window.filterFiles = filterFiles;
+   window.sortFiles = sortFiles;
+   window.closeFileDetailsModal = closeFileDetailsModal;
+   window.openUploadModal = openUploadModal;
+   window.switchTab = switchTab;
+   window.viewDataset = viewDataset;
+   window.deleteDataset = deleteDataset;
+   window.checkBatchStatus = checkBatchStatus;
+   window.clearSelectedFiles = clearSelectedFiles;
+   window.updateWindParams = updateWindParams;
+   window.resetView = resetView;
+   window.debugData = debugData;
+   window.loadDatasets = loadDatasets;
 </script>
   
 </body>

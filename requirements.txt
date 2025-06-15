@@ -14,6 +14,7 @@ rioxarray
 rasterio
 pyproj
 shapely
+geojson  # Add this line - required for mapbox_dataset_manager.py
 
 # AWS S3 for Mapbox uploads
 boto3
