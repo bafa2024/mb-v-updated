@@ -1,5 +1,5 @@
-# app.py - Weather Visualization Application with Multi-file Upload Support
-from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException, BackgroundTasks
+# app.py - Weather Visualization Application with Multi-file Upload Support and File Management
+from fastapi import FastAPI, UploadFile, File, Request, Form, HTTPException, BackgroundTasks, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 import uuid
+import shutil
 
 # Fix for Windows path issues
 if sys.platform == "win32":
@@ -113,11 +114,26 @@ class BatchProcessingStatus(BaseModel):
     files: List[Dict[str, any]]
     errors: List[Dict[str, str]]
 
+class FileInfo(BaseModel):
+    id: str
+    filename: str
+    original_filename: str
+    size: int
+    upload_date: str
+    status: str
+    metadata: Optional[Dict] = None
+    tileset_id: Optional[str] = None
+    job_id: Optional[str] = None
+    processing_status: Optional[str] = None
+    error: Optional[str] = None
+    batch_id: Optional[str] = None
+
 # In-memory storage
 active_visualizations = {}
 active_sessions = {}  # Store session data for client-side animation
 batch_jobs = {}  # Store batch processing jobs
 active_datasets = {}  # Store dataset information
+uploaded_files = {}  # Store uploaded file information
 
 # Thread pool for parallel processing
 executor = ThreadPoolExecutor(max_workers=4)
@@ -129,6 +145,73 @@ DEFAULT_TILESET = {
     "type": "default",
     "format": "raster-array"
 }
+
+# File management database (in-memory for now, can be replaced with a real database)
+def load_file_database():
+    """Load file information from uploads directory"""
+    global uploaded_files
+    uploaded_files = {}
+    
+    try:
+        for file_path in Config.UPLOAD_DIR.glob("*.nc"):
+            try:
+                stat = file_path.stat()
+                file_id = file_path.stem.split('_')[0]  # Extract job_id
+                
+                # Check if we have metadata in active_visualizations
+                metadata = None
+                tileset_id = None
+                processing_status = "unknown"
+                
+                if file_id in active_visualizations:
+                    viz_info = active_visualizations[file_id]
+                    metadata = viz_info.get('metadata')
+                    tileset_id = viz_info.get('tileset_id')
+                    processing_status = viz_info.get('status', 'unknown')
+                
+                uploaded_files[file_id] = {
+                    "id": file_id,
+                    "filename": file_path.name,
+                    "original_filename": '_'.join(file_path.stem.split('_')[1:]) + '.nc',
+                    "size": stat.st_size,
+                    "upload_date": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "status": "active",
+                    "metadata": metadata,
+                    "tileset_id": tileset_id,
+                    "job_id": file_id,
+                    "processing_status": processing_status,
+                    "file_path": str(file_path)
+                }
+            except Exception as e:
+                logger.error(f"Error loading file info for {file_path}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error loading file database: {e}")
+
+# Initialize file database on startup
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting Weather Visualization Platform v5.0...")
+    logger.info(f"Mapbox Username: {Config.MAPBOX_USERNAME}")
+    logger.info(f"Mapbox Token Set: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
+    logger.info(f"Mapbox Public Token Set: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
+    logger.info(f"Max Batch Size: {Config.MAX_BATCH_SIZE}")
+    
+    # Load file database
+    load_file_database()
+    
+    # Run cleanup
+    await cleanup_old_files()
+    
+    # Test Mapbox connection
+    if Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
+        try:
+            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
+            tilesets = manager.list_tilesets(limit=1)
+            logger.info(f"Mapbox connection successful. Found {len(tilesets)} tilesets.")
+            
+        except Exception as e:
+            logger.error(f"Mapbox connection test failed: {e}")
 
 @app.get("/", response_class=HTMLResponse)
 async def main_page(request: Request):
@@ -203,6 +286,234 @@ async def main_page(request: Request):
         "max_batch_size": Config.MAX_BATCH_SIZE
     })
 
+# File Management API Endpoints
+@app.get("/api/files")
+async def list_files(
+    search: Optional[str] = Query(None, description="Search term for filename"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    sort_by: Optional[str] = Query("upload_date", description="Sort field"),
+    sort_order: Optional[str] = Query("desc", description="Sort order (asc/desc)")
+):
+    """List all uploaded NetCDF files with optional filtering and sorting"""
+    # Reload file database to get latest info
+    load_file_database()
+    
+    # Start with all files
+    files = list(uploaded_files.values())
+    
+    # Apply search filter
+    if search:
+        search_lower = search.lower()
+        files = [f for f in files if search_lower in f['original_filename'].lower()]
+    
+    # Apply status filter
+    if status and status != "all":
+        files = [f for f in files if f.get('processing_status') == status]
+    
+    # Sort files
+    reverse = (sort_order == "desc")
+    if sort_by == "filename":
+        files.sort(key=lambda x: x['original_filename'], reverse=reverse)
+    elif sort_by == "size":
+        files.sort(key=lambda x: x['size'], reverse=reverse)
+    elif sort_by == "upload_date":
+        files.sort(key=lambda x: x['upload_date'], reverse=reverse)
+    
+    return {
+        "success": True,
+        "files": files,
+        "total": len(files)
+    }
+
+@app.get("/api/file/{file_id}")
+async def get_file_info(file_id: str):
+    """Get detailed information about a specific file"""
+    if file_id not in uploaded_files:
+        raise HTTPException(404, "File not found")
+    
+    file_info = uploaded_files[file_id]
+    
+    # Get additional info from active visualizations if available
+    if file_id in active_visualizations:
+        viz_info = active_visualizations[file_id]
+        file_info['visualization_info'] = {
+            'tileset_id': viz_info.get('tileset_id'),
+            'mapbox_tileset': viz_info.get('mapbox_tileset'),
+            'format': viz_info.get('format'),
+            'wind_components': viz_info.get('wind_components'),
+            'bounds': viz_info.get('bounds'),
+            'center': viz_info.get('center'),
+            'zoom': viz_info.get('zoom')
+        }
+    
+    return file_info
+
+@app.delete("/api/file/{file_id}")
+async def delete_file(file_id: str):
+    """Delete an uploaded file and its associated data"""
+    if file_id not in uploaded_files:
+        raise HTTPException(404, "File not found")
+    
+    file_info = uploaded_files[file_id]
+    file_path = Path(file_info['file_path'])
+    
+    try:
+        # Delete the physical file
+        if file_path.exists():
+            file_path.unlink()
+            logger.info(f"Deleted file: {file_path}")
+        
+        # Remove from active visualizations
+        if file_id in active_visualizations:
+            del active_visualizations[file_id]
+        
+        # Remove from active sessions
+        if file_id in active_sessions:
+            del active_sessions[file_id]
+        
+        # Delete associated recipe files
+        recipe_files = list(Config.RECIPE_DIR.glob(f"*{file_id}*.json"))
+        for recipe_file in recipe_files:
+            try:
+                recipe_file.unlink()
+                logger.info(f"Deleted recipe: {recipe_file}")
+            except Exception as e:
+                logger.error(f"Error deleting recipe: {e}")
+        
+        # Remove from uploaded files
+        del uploaded_files[file_id]
+        
+        return {
+            "success": True,
+            "message": "File deleted successfully",
+            "file_id": file_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error deleting file {file_id}: {e}")
+        raise HTTPException(500, f"Failed to delete file: {str(e)}")
+
+@app.post("/api/file/{file_id}/reprocess")
+async def reprocess_file(
+    background_tasks: BackgroundTasks,
+    file_id: str,
+    visualization_type: str = Form("vector")
+):
+    """Reprocess an existing NetCDF file"""
+    if file_id not in uploaded_files:
+        raise HTTPException(404, "File not found")
+    
+    file_info = uploaded_files[file_id]
+    file_path = Path(file_info['file_path'])
+    
+    if not file_path.exists():
+        raise HTTPException(404, "File no longer exists on disk")
+    
+    try:
+        # Process file again
+        result = await process_netcdf_file(
+            file_path, file_id, True, None, visualization_type
+        )
+        
+        if result.get('wind_data'):
+            active_sessions[file_id] = {
+                'file_path': str(file_path),
+                'wind_data': result['wind_data'],
+                'bounds': result.get('bounds'),
+                'center': result.get('center'),
+                'zoom': result.get('zoom'),
+                'created_at': datetime.now().isoformat()
+            }
+            result['session_id'] = file_id
+        
+        if Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
+            # Start background tileset creation
+            background_tasks.add_task(
+                create_mapbox_tileset_background,
+                file_path,
+                file_id,
+                result.get('tileset_id'),
+                visualization_type
+            )
+            
+            result['status'] = 'processing'
+            result['message'] = f'Reprocessing file {file_info["original_filename"]}...'
+        
+        # Update file info
+        uploaded_files[file_id]['processing_status'] = 'processing'
+        uploaded_files[file_id]['metadata'] = result.get('metadata')
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error reprocessing file {file_id}: {e}")
+        raise HTTPException(500, f"Failed to reprocess file: {str(e)}")
+
+@app.get("/api/file/{file_id}/download")
+async def download_file(file_id: str):
+    """Download the original NetCDF file"""
+    if file_id not in uploaded_files:
+        raise HTTPException(404, "File not found")
+    
+    file_info = uploaded_files[file_id]
+    file_path = Path(file_info['file_path'])
+    
+    if not file_path.exists():
+        raise HTTPException(404, "File no longer exists on disk")
+    
+    return FileResponse(
+        path=str(file_path),
+        filename=file_info['original_filename'],
+        media_type='application/x-netcdf'
+    )
+
+@app.post("/api/files/delete-batch")
+async def delete_files_batch(file_ids: List[str]):
+    """Delete multiple files at once"""
+    deleted = []
+    errors = []
+    
+    for file_id in file_ids:
+        try:
+            if file_id in uploaded_files:
+                # Use the existing delete logic
+                file_info = uploaded_files[file_id]
+                file_path = Path(file_info['file_path'])
+                
+                # Delete the physical file
+                if file_path.exists():
+                    file_path.unlink()
+                
+                # Clean up associated data
+                if file_id in active_visualizations:
+                    del active_visualizations[file_id]
+                if file_id in active_sessions:
+                    del active_sessions[file_id]
+                
+                # Delete recipe files
+                recipe_files = list(Config.RECIPE_DIR.glob(f"*{file_id}*.json"))
+                for recipe_file in recipe_files:
+                    try:
+                        recipe_file.unlink()
+                    except:
+                        pass
+                
+                del uploaded_files[file_id]
+                deleted.append(file_id)
+            else:
+                errors.append({"file_id": file_id, "error": "File not found"})
+                
+        except Exception as e:
+            errors.append({"file_id": file_id, "error": str(e)})
+    
+    return {
+        "success": len(deleted) > 0,
+        "deleted": deleted,
+        "errors": errors,
+        "message": f"Deleted {len(deleted)} files, {len(errors)} errors"
+    }
+
+# Existing endpoints remain the same...
 @app.post("/api/upload-netcdf")
 async def upload_netcdf(
     background_tasks: BackgroundTasks,
@@ -237,6 +548,24 @@ async def upload_netcdf(
         visualization_type=visualization_type,
         background_tasks=background_tasks
     )
+    
+    # Update file database
+    if result['files']:
+        file_result = result['files'][0]
+        if file_result.get('success'):
+            uploaded_files[job_id] = {
+                "id": job_id,
+                "filename": f"{job_id}_{file.filename}",
+                "original_filename": file.filename,
+                "size": file_size,
+                "upload_date": datetime.now().isoformat(),
+                "status": "active",
+                "metadata": file_result.get('metadata'),
+                "tileset_id": file_result.get('tileset_id'),
+                "job_id": job_id,
+                "processing_status": file_result.get('status', 'processing'),
+                "file_path": str(Config.UPLOAD_DIR / f"{job_id}_{file.filename}")
+            }
     
     # Return single file result
     if result['files']:
@@ -330,6 +659,26 @@ async def upload_netcdf_batch(
     
     # Update batch job status
     batch_jobs[batch_id].update(result)
+    
+    # Update file database for each file
+    for i, file_result in enumerate(result.get('files', [])):
+        if file_result.get('success'):
+            job_id = job_ids[i]
+            file = files[i]
+            uploaded_files[job_id] = {
+                "id": job_id,
+                "filename": f"{job_id}_{file.filename}",
+                "original_filename": file.filename,
+                "size": len(file_contents[i]['content']),
+                "upload_date": datetime.now().isoformat(),
+                "status": "active",
+                "metadata": file_result.get('metadata'),
+                "tileset_id": file_result.get('tileset_id'),
+                "job_id": job_id,
+                "processing_status": file_result.get('status', 'processing'),
+                "batch_id": batch_id,
+                "file_path": str(Config.UPLOAD_DIR / f"{job_id}_{file.filename}")
+            }
     
     return JSONResponse(result)
 
@@ -754,6 +1103,10 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
             if job_id in active_visualizations:
                 active_visualizations[job_id]['status'] = 'failed'
                 active_visualizations[job_id]['error'] = 'Mapbox token not configured'
+            # Update file database
+            if job_id in uploaded_files:
+                uploaded_files[job_id]['processing_status'] = 'failed'
+                uploaded_files[job_id]['error'] = 'Mapbox token not configured'
             return
         
         # Convert Path to string
@@ -765,6 +1118,10 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
             if job_id in active_visualizations:
                 active_visualizations[job_id]['status'] = 'failed'
                 active_visualizations[job_id]['error'] = 'Input file not found'
+            # Update file database
+            if job_id in uploaded_files:
+                uploaded_files[job_id]['processing_status'] = 'failed'
+                uploaded_files[job_id]['error'] = 'Input file not found'
             return
         
         # Get the requested format from active_visualizations
@@ -802,6 +1159,11 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     
                     # Save recipe info with proper format
                     save_recipe_info(tileset_id, result, active_visualizations[job_id])
+                
+                # Update file database
+                if job_id in uploaded_files:
+                    uploaded_files[job_id]['processing_status'] = 'completed'
+                    uploaded_files[job_id]['tileset_id'] = result['tileset_id']
                     
                 logger.info("Successfully created raster-array tileset")
                 
@@ -827,6 +1189,11 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     if job_id in active_visualizations:
                         active_visualizations[job_id]['error'] = result.get('error')
                         active_visualizations[job_id]['status'] = 'failed'
+                    
+                    # Update file database
+                    if job_id in uploaded_files:
+                        uploaded_files[job_id]['processing_status'] = 'failed'
+                        uploaded_files[job_id]['error'] = result.get('error')
                     
                     # Update batch job if part of batch
                     if batch_id and batch_id in batch_jobs:
@@ -868,6 +1235,11 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                     # Save recipe info with correct formats
                     save_recipe_info(tileset_id, result, active_visualizations[job_id])
                 
+                # Update file database
+                if job_id in uploaded_files:
+                    uploaded_files[job_id]['processing_status'] = 'completed'
+                    uploaded_files[job_id]['tileset_id'] = result['tileset_id']
+                
                 # Update batch job if part of batch
                 if batch_id and batch_id in batch_jobs:
                     for file_info in batch_jobs[batch_id]['files']:
@@ -882,6 +1254,11 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
                 if job_id in active_visualizations:
                     active_visualizations[job_id]['status'] = 'failed'
                     active_visualizations[job_id]['error'] = error_msg
+                
+                # Update file database
+                if job_id in uploaded_files:
+                    uploaded_files[job_id]['processing_status'] = 'failed'
+                    uploaded_files[job_id]['error'] = error_msg
                 
                 # Update batch job if part of batch
                 if batch_id and batch_id in batch_jobs:
@@ -899,6 +1276,11 @@ async def create_mapbox_tileset_background(file_path: Path, job_id: str,
         if job_id in active_visualizations:
             active_visualizations[job_id]['status'] = 'failed'
             active_visualizations[job_id]['error'] = str(e)
+        
+        # Update file database
+        if job_id in uploaded_files:
+            uploaded_files[job_id]['processing_status'] = 'failed'
+            uploaded_files[job_id]['error'] = str(e)
         
         # Update batch job if part of batch
         if batch_id and batch_id in batch_jobs:
@@ -953,6 +1335,12 @@ async def get_visualization_status(job_id: str):
         raise HTTPException(404, "Job not found")
     
     viz_info = active_visualizations[job_id]
+    
+    # Update file database status if needed
+    if job_id in uploaded_files:
+        uploaded_files[job_id]['processing_status'] = viz_info.get('status', 'processing')
+        if viz_info.get('error'):
+            uploaded_files[job_id]['error'] = viz_info.get('error')
     
     return JSONResponse({
         "job_id": job_id,
@@ -1591,6 +1979,9 @@ async def convert_dataset_to_tileset(
     except Exception as e:
         logger.error(f"Error converting dataset to tileset: {str(e)}")
         raise HTTPException(500, str(e))
+
+@app.get("/api/active-visualizations")
+async def get_active_visualizations():
     """Get list of active visualizations"""
     # Group by batch if applicable
     batched_visualizations = {}
@@ -1669,6 +2060,10 @@ async def delete_visualization(job_id: str):
     if job_id in active_sessions:
         del active_sessions[job_id]
     
+    # Remove from uploaded files
+    if job_id in uploaded_files:
+        del uploaded_files[job_id]
+    
     return {"success": True, "message": "Visualization deleted"}
 
 @app.delete("/api/batch/{batch_id}")
@@ -1702,6 +2097,10 @@ async def delete_batch(batch_id: str):
             if job_id in active_sessions:
                 del active_sessions[job_id]
             
+            # Remove from uploaded files
+            if job_id in uploaded_files:
+                del uploaded_files[job_id]
+            
             deleted_count += 1
     
     # Remove batch job
@@ -1724,6 +2123,7 @@ async def health_check():
         "active_sessions": len(active_sessions),
         "active_batches": len(batch_jobs),
         "active_datasets": len(active_datasets),
+        "uploaded_files": len(uploaded_files),
         "version": "5.0.0"
     }
 
@@ -1736,8 +2136,11 @@ async def cleanup_old_files():
         for dir_path in [Config.UPLOAD_DIR, Config.PROCESSED_DIR]:
             for file_path in dir_path.glob("*"):
                 if file_path.is_file() and file_path.stat().st_mtime < cutoff_time:
-                    file_path.unlink()
-                    logger.info(f"Cleaned up old file: {file_path}")
+                    # Check if file is still in use
+                    file_id = file_path.stem.split('_')[0]
+                    if file_id not in uploaded_files and file_id not in active_visualizations:
+                        file_path.unlink()
+                        logger.info(f"Cleaned up old file: {file_path}")
         
         # Clean up old sessions
         to_remove = []
@@ -1763,28 +2166,6 @@ async def cleanup_old_files():
                     
     except Exception as e:
         logger.error(f"Error during cleanup: {e}")
-
-# Startup event
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Starting Weather Visualization Platform v5.0...")
-    logger.info(f"Mapbox Username: {Config.MAPBOX_USERNAME}")
-    logger.info(f"Mapbox Token Set: {'Yes' if Config.MAPBOX_TOKEN else 'No'}")
-    logger.info(f"Mapbox Public Token Set: {'Yes' if Config.MAPBOX_PUBLIC_TOKEN else 'No'}")
-    logger.info(f"Max Batch Size: {Config.MAX_BATCH_SIZE}")
-    
-    # Run cleanup
-    await cleanup_old_files()
-    
-    # Test Mapbox connection
-    if Config.MAPBOX_TOKEN and Config.MAPBOX_USERNAME:
-        try:
-            manager = MapboxTilesetManager(Config.MAPBOX_TOKEN, Config.MAPBOX_USERNAME)
-            tilesets = manager.list_tilesets(limit=1)
-            logger.info(f"Mapbox connection successful. Found {len(tilesets)} tilesets.")
-            
-        except Exception as e:
-            logger.error(f"Mapbox connection test failed: {e}")
 
 # Shutdown event
 @app.on_event("shutdown")
