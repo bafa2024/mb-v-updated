@@ -78,7 +78,7 @@
         }
         
         .search-input {
-            width: 100%;
+            width: 70%;
             padding: 8px 35px 8px 12px;
             background: rgba(255, 255, 255, 0.1);
             border: 1px solid rgba(255, 255, 255, 0.2);
@@ -919,11 +919,9 @@
         <div class="file-panel-header">
             <div class="file-panel-title">
                 <span>📁</span>
-                <span>File Management</span>
+                <span>Upload Management</span>
             </div>
-            <button class="btn btn-success btn-small" onclick="openUploadModal()">
-                + Upload
-            </button>
+           
         </div>
         
         <div class="file-panel-controls">
@@ -959,8 +957,8 @@
         <div class="file-panel-footer">
             <div class="selected-count" id="selectedCount">0 files selected</div>
             <div class="bulk-actions">
-                <button class="btn btn-small btn-secondary" onclick="selectAll()">Select All</button>
-                <button class="btn btn-small btn-danger" onclick="deleteSelected()" disabled id="deleteSelectedBtn">Delete</button>
+                <button class="btn btn-secondary" onclick="selectAll()">Select All</button>
+                <button class="btn  btn-danger" onclick="deleteSelected()" disabled id="deleteSelectedBtn">Delete</button>
             </div>
         </div>
     </div>
